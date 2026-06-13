@@ -46,13 +46,15 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
 The script works with OBS's normal **Save Replay** action — naming, sorting, and
 notifications are applied automatically whenever a replay is saved.
 
-It also registers two extra actions, bindable under **Settings → Hotkeys**:
+It also registers three extra actions, bindable under **Settings → Hotkeys**:
 
 - **Save short clip** — saves a replay trimmed to the last *N%* of the buffer.
 - **Save buffer (alternative folder)** — saves the next clip to the alternative folder.
+- **Open last saved video** — opens the most recently saved clip or recording in your default player.
 
 Suggested defaults: `Ctrl+F10` for the short clip and `Alt+F10` for the
-alternative folder — change them freely in OBS hotkey settings.
+alternative folder (the open-last-video action has no default — bind it yourself).
+Change them freely in OBS hotkey settings.
 
 ## Settings
 

@@ -42,7 +42,7 @@ user32 = ctypes.windll.user32
 
 
 class CONSTANTS:
-    VERSION = "1.0"
+    VERSION = "1.1"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -121,6 +121,7 @@ class VARIABLES:
     cached_active_exe: Path | None = None
     last_created_clip_folder: Path | None = None
     last_links_folder: Path | None = None
+    last_saved_clip_path: Path | None = None
     sidecar_persist_enabled = False
     update_check_in_progress = False
     update_status_props = None
@@ -224,6 +225,7 @@ class PropertiesNames:
     HK_SAVE_BUFFER_MODE_2 = "save_buffer_force_mode_2"
     HK_SAVE_BUFFER_MODE_3 = "save_buffer_force_mode_3"
     HK_SAVE_BUFFER_OVERRIDE = "save_buffer_override_folder"
+    HK_OPEN_LAST_VIDEO = "open_last_video"
 
 PN = PropertiesNames
 
@@ -2693,6 +2695,50 @@ def save_half_buffer():
         reset_forced_save_state()
 
 
+def open_last_saved_video():
+    """
+    Opens the most recently produced video with its default application.
+    Considers the last clip this script saved plus OBS's last recording and
+    last replay, and opens whichever file is newest.
+    Can only be called using hotkeys.
+    """
+    candidates = []
+    if VARIABLES.last_saved_clip_path is not None:
+        candidates.append(Path(VARIABLES.last_saved_clip_path))
+
+    for getter_name in ("obs_frontend_get_last_recording", "obs_frontend_get_last_replay"):
+        getter = getattr(obs, getter_name, None)
+        if getter is None:
+            continue
+        with suppress(Exception):
+            raw_path = getter()
+            if raw_path:
+                candidates.append(Path(raw_path))
+
+    existing = []
+    seen = set()
+    for candidate in candidates:
+        with suppress(Exception):
+            key = candidate.resolve()
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_file():
+                existing.append(candidate)
+
+    if not existing:
+        _print("Open last video: no saved video found yet.")
+        return
+
+    try:
+        target = max(existing, key=lambda p: p.stat().st_mtime)
+        _print(f"Opening last video: {target}")
+        os.startfile(str(target))
+    except Exception:
+        _print("Cannot open last video.")
+        _print(traceback.format_exc())
+
+
 # -------------------- obs_events_callbacks.py --------------------
 def on_recording_started_callback(event):
     if event != obs.OBS_FRONTEND_EVENT_RECORDING_STARTED:
@@ -2771,6 +2817,8 @@ def on_buffer_save_callback(event):
         _print("-" * 50)
         return
 
+    VARIABLES.last_saved_clip_path = path
+
     if half_buffer_save:
         short_percent = obs.obs_data_get_int(VARIABLES.script_settings, PN.PROP_SHORT_BUFFER_PERCENT)
         short_percent = min(max(short_percent, 5), 100)
@@ -2839,7 +2887,10 @@ def load_hotkeys():
          lambda pressed: save_half_buffer() if pressed else None),
 
         (PN.HK_SAVE_BUFFER_OVERRIDE, "[Moment Replays] Save buffer (override folder)",
-         lambda pressed: save_buffer_to_override_folder() if pressed else None)
+         lambda pressed: save_buffer_to_override_folder() if pressed else None),
+
+        (PN.HK_OPEN_LAST_VIDEO, "[Moment Replays] Open last saved video",
+         lambda pressed: open_last_saved_video() if pressed else None)
     )
 
     for key_name, key_desc, key_callback in keys:
@@ -3311,6 +3362,7 @@ def script_unload():
     VARIABLES.cached_active_exe = None
     VARIABLES.last_created_clip_folder = None
     VARIABLES.last_links_folder = None
+    VARIABLES.last_saved_clip_path = None
     reset_forced_save_state()
 
     _print("Script unloaded.")
