@@ -1,0 +1,28 @@
+# Backups & scratch
+_backups/
+.tmp/
+__pycache__/
+*.pyc
+
+# Per-user settings (personal paths) — never publish
+arkanoid_replays.settings.json
+arkanoid_replays.app_rules.json
+
+# Internal dev notes — not part of the released add-on
+memory.md
+memorybank.md
+TODOs.md
+rehook_plugin_plan.md
+
+# Other OBS add-ons that live in this workspace but ship separately
+auto_rehook_game_capture.lua
+obs-audio-monitor-toggler.lua
+
+# Native plugin build artifacts
+obs.def
+obs.exp
+
+# Extra/unused sound assets (only the four wired defaults ship)
+Recording_Error.wav
+Replay_Started.wav
+Replay_Error.wav
