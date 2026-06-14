@@ -68,6 +68,16 @@ Change them freely in OBS hotkey settings.
 Bundled sounds are pre-selected for convenience; replace them with your own
 `.wav` files or turn notifications off entirely.
 
+## Development
+
+The pure logic is covered by a standard-library test suite (no dependencies):
+
+```sh
+python -m unittest discover -s tests
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for the version history.
+
 ## License
 
 [AGPL-3.0](LICENSE) © 2025 Moment

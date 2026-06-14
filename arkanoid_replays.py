@@ -38,11 +38,12 @@ if __name__ != '__main__':
 
 
 # -------------------- globals.py --------------------
-user32 = ctypes.windll.user32
+IS_WINDOWS = sys.platform == "win32"
+user32 = ctypes.windll.user32 if IS_WINDOWS else None
 
 
 class CONSTANTS:
-    VERSION = "1.1"
+    VERSION = "1.2"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -112,7 +113,6 @@ class VARIABLES:
     name_replacements: dict[str, str] = {}
     script_settings = None
     hotkey_ids: dict = {}
-    force_mode = None
     force_override_save = False
     half_buffer_save = False
     forced_save_watchdog_armed = False
@@ -187,6 +187,7 @@ class PropertiesNames:
     # Aliases settings
     PROP_ALIASES_LIST = "aliases_list"
     TXT_ALIASES_DESC = "aliases_desc"
+    TXT_ALIASES_FORMAT = "aliases_format_text"
 
     # Aliases parsing error texts
     TXT_ALIASES_PATH_EXISTS = "aliases_path_exists_err"
@@ -221,9 +222,6 @@ class PropertiesNames:
 
     # Hotkeys
     HK_SAVE_BUFFER_HALF = "save_buffer_half"
-    HK_SAVE_BUFFER_MODE_1 = "save_buffer_force_mode_1"
-    HK_SAVE_BUFFER_MODE_2 = "save_buffer_force_mode_2"
-    HK_SAVE_BUFFER_MODE_3 = "save_buffer_force_mode_3"
     HK_SAVE_BUFFER_OVERRIDE = "save_buffer_override_folder"
     HK_OPEN_LAST_VIDEO = "open_last_video"
 
@@ -979,7 +977,7 @@ def refresh_localized_properties(props, data=None) -> None:
     set_property_description(app_rules, PN.TXT_ALIASES_INVALID_CHARACTERS, tr("alias_invalid_chars", data=data))
     set_property_description(app_rules, PN.TXT_ALIASES_PATH_EXISTS, tr("alias_path_exists", data=data))
     set_property_description(app_rules, PN.TXT_ALIASES_INVALID_FORMAT, tr("alias_invalid_format", data=data))
-    set_property_description(app_rules, "temp", tr("aliases_format_desc", data=data, python_exe=sys.executable))
+    set_property_description(app_rules, PN.TXT_ALIASES_FORMAT, tr("aliases_format_desc", data=data, python_exe=sys.executable))
     set_property_description(app_rules, PN.PROP_ALIASES_IMPORT_PATH, tr("import_rules_file", data=data))
     set_property_description(app_rules, PN.BTN_ALIASES_IMPORT, tr("import_path_specific_names", data=data))
     set_property_description(app_rules, PN.PROP_ALIASES_EXPORT_PATH, tr("export_rules_folder", data=data))
@@ -1298,7 +1296,7 @@ def setup_aliases_settings(group_obj):
 
     t = obs.obs_properties_add_text(
         props=group_obj,
-        name="temp",
+        name=PN.TXT_ALIASES_FORMAT,
         description=tr("aliases_format_desc", python_exe=sys.executable),
         type=obs.OBS_TEXT_INFO
     )
@@ -1879,7 +1877,6 @@ def _print(*values, sep: str | None = None, end: str | None = None, file=None, f
 
 
 def reset_forced_save_state():
-    VARIABLES.force_mode = None
     VARIABLES.force_override_save = False
     VARIABLES.half_buffer_save = False
     cancel_forced_save_watchdog()
@@ -1910,7 +1907,6 @@ def arm_forced_save_watchdog():
 
 def has_pending_forced_save() -> bool:
     return (CONSTANTS.CLIPS_FORCE_MODE_LOCK.locked() or
-            VARIABLES.force_mode is not None or
             VARIABLES.force_override_save or
             VARIABLES.half_buffer_save)
 
@@ -2622,28 +2618,6 @@ def move_clip_file_override() -> tuple[str, Path]:
     return Path(old_file_path).stem, new_path
 
 
-def save_buffer_with_force_mode(mode: ClipNamingModes):
-    """
-    Sends a request to save the replay buffer and setting a specific clip naming mode.
-    Can only be called using hotkeys.
-    """
-    if not obs.obs_frontend_replay_buffer_active():
-        return
-
-    if not CONSTANTS.CLIPS_FORCE_MODE_LOCK.acquire(blocking=False):
-        return
-
-    try:
-        VARIABLES.force_override_save = False
-        VARIABLES.force_mode = mode
-        obs.obs_frontend_replay_buffer_save()
-        arm_forced_save_watchdog()
-    except Exception:
-        _print("Cannot trigger replay buffer save for force mode.")
-        _print(traceback.format_exc())
-        reset_forced_save_state()
-
-
 def save_buffer_to_override_folder():
     """
     Sends a request to save the replay buffer and moves the clip to the override folder.
@@ -2659,7 +2633,6 @@ def save_buffer_to_override_folder():
         return
 
     try:
-        VARIABLES.force_mode = None
         VARIABLES.force_override_save = True
         obs.obs_frontend_replay_buffer_save()
         arm_forced_save_watchdog()
@@ -2684,7 +2657,6 @@ def save_half_buffer():
         return
 
     try:
-        VARIABLES.force_mode = None
         VARIABLES.force_override_save = False
         VARIABLES.half_buffer_save = True
         obs.obs_frontend_replay_buffer_save()
@@ -2808,7 +2780,7 @@ def on_buffer_save_callback(event):
         if force_override:
             _, path = move_clip_file_override()
         else:
-            _, path = move_clip_file(mode=VARIABLES.force_mode, create_links=not half_buffer_save)
+            _, path = move_clip_file(create_links=not half_buffer_save)
     except Exception:
         _print("An error occurred while moving file to the new destination.")
         _print(traceback.format_exc())
@@ -3318,6 +3290,9 @@ def script_load(script_settings):
     _print("Loading script...")
     VARIABLES.sidecar_persist_enabled = False
     VARIABLES.script_settings = script_settings
+    if not IS_WINDOWS:
+        _print("Moment Replays is Windows-only; the script is loaded but its active features are disabled on this platform.")
+        return
     obs.obs_data_set_bool(script_settings, PN.PROP_CLIPS_SAVE_TO_FOLDER, True)
     VARIABLES.clip_exe_counts = {}
     VARIABLES.forced_save_watchdog_armed = False
