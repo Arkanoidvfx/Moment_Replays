@@ -1,5 +1,7 @@
 # Moment Replays
 
+[![tests](https://github.com/Arkanoidvfx/Moment_Replays/actions/workflows/tests.yml/badge.svg)](https://github.com/Arkanoidvfx/Moment_Replays/actions/workflows/tests.yml)
+
 An OBS Studio script for flexible replay-buffer clip management on Windows.
 It automatically renames and sorts your saved replay clips — by the app or
 scene you were in — and adds path/`.exe` naming rules, sound notifications,
