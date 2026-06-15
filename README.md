@@ -1,7 +1,5 @@
 # Moment Replays
 
-[![tests](https://github.com/Arkanoidvfx/Moment_Replays/actions/workflows/tests.yml/badge.svg)](https://github.com/Arkanoidvfx/Moment_Replays/actions/workflows/tests.yml)
-
 An OBS Studio script for flexible replay-buffer clip management on Windows.
 It automatically renames and sorts your saved replay clips — by the app or
 scene you were in — and adds path/`.exe` naming rules, sound notifications,
@@ -37,11 +35,11 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
 
 ## Installation
 
-1. Download `arkanoid_replays.py` together with the bundled `*.wav` sound files
+1. Download `Moment_Replays.py` together with the bundled `*.wav` sound files
    (keep them in the same folder).
 2. In OBS: **Tools → Scripts**.
 3. On the **Python Settings** tab, point OBS to a Python install if prompted.
-4. On the **Scripts** tab, click **+** and select `arkanoid_replays.py`.
+4. On the **Scripts** tab, click **+** and select `Moment_Replays.py`.
 
 ## Hotkeys
 
@@ -69,14 +67,6 @@ Change them freely in OBS hotkey settings.
 
 Bundled sounds are pre-selected for convenience; replace them with your own
 `.wav` files or turn notifications off entirely.
-
-## Development
-
-The pure logic is covered by a standard-library test suite (no dependencies):
-
-```sh
-python -m unittest discover -s tests
-```
 
 See [CHANGELOG.md](CHANGELOG.md) for the version history.
 

@@ -43,7 +43,7 @@ user32 = ctypes.windll.user32 if IS_WINDOWS else None
 
 
 class CONSTANTS:
-    VERSION = "1.3"
+    VERSION = "1.4"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -65,7 +65,8 @@ class CONSTANTS:
     DEFAULT_FAILURE_SOUND_PATH = SCRIPT_DIR / "Replay_Failed.wav"
     DEFAULT_RECORDING_START_SOUND_PATH = SCRIPT_DIR / "Recording_Started.wav"
     DEFAULT_RECORDING_STOP_SOUND_PATH = SCRIPT_DIR / "Recording_Stoped.wav"
-    SETTINGS_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.settings.json")
+    SETTINGS_PERSIST_PATH = Path(__file__).with_name("Moment_Replays.settings.json")
+    LEGACY_SETTINGS_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.settings.json")
     SETTINGS_SCHEMA_VERSION = 5
     LEGACY_APP_RULES_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.app_rules.json")
     GITHUB_PROJECT_URL = "https://github.com/Arkanoidvfx/Moment_Replays"
@@ -3011,6 +3012,8 @@ def register_frontend_event_callbacks() -> None:
 def get_existing_persisted_settings_path() -> Path:
     if CONSTANTS.SETTINGS_PERSIST_PATH.exists():
         return CONSTANTS.SETTINGS_PERSIST_PATH
+    if CONSTANTS.LEGACY_SETTINGS_PERSIST_PATH.exists():
+        return CONSTANTS.LEGACY_SETTINGS_PERSIST_PATH
     if CONSTANTS.LEGACY_APP_RULES_PERSIST_PATH.exists():
         return CONSTANTS.LEGACY_APP_RULES_PERSIST_PATH
     return CONSTANTS.SETTINGS_PERSIST_PATH

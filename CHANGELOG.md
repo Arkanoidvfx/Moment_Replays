@@ -2,6 +2,13 @@
 
 All notable changes to Moment Replays are documented here.
 
+## v1.4
+- Renamed the script file `arkanoid_replays.py` → `Moment_Replays.py`. Existing
+  settings are preserved: the settings file is now `Moment_Replays.settings.json`,
+  and the old `arkanoid_replays.settings.json` is still read as a fallback.
+- Repository slimmed down for distribution (internal tooling kept out of the
+  published tree).
+
 ## v1.3
 - **Open last saved video** now cooperates with in-progress saves: pressing the
   hotkey while a replay is still being saved (or a short clip is still being

@@ -5,8 +5,13 @@ __pycache__/
 *.pyc
 
 # Per-user settings (personal paths) — never publish
+Moment_Replays.settings.json
 arkanoid_replays.settings.json
 arkanoid_replays.app_rules.json
+
+# Local-only dev tooling — kept on disk, not part of the released add-on
+tests/
+.github/
 
 # Internal dev notes — not part of the released add-on
 memory.md
