@@ -43,13 +43,14 @@ user32 = ctypes.windll.user32 if IS_WINDOWS else None
 
 
 class CONSTANTS:
-    VERSION = "1.2"
+    VERSION = "1.3"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
     CLIPS_FORCE_MODE_LOCK = Lock()
     UPDATE_CHECK_LOCK = Lock()
     FORCED_SAVE_TIMEOUT_MS = 30000
+    OPEN_LAST_VIDEO_WAIT_INTERVAL_MS = 250
     FILENAME_PROHIBITED_CHARS = r'/\:"<>*?|%'
     PATH_PROHIBITED_CHARS = r'"<>*?|%'
     DEFAULT_FILENAME_FORMAT = "%NAME_%d.%m.%Y_%H-%M-%S"
@@ -122,6 +123,9 @@ class VARIABLES:
     last_created_clip_folder: Path | None = None
     last_links_folder: Path | None = None
     last_saved_clip_path: Path | None = None
+    save_in_progress = False
+    open_last_video_requested = False
+    open_last_video_wait_ticks = 0
     sidecar_persist_enabled = False
     update_check_in_progress = False
     update_status_props = None
@@ -2140,9 +2144,13 @@ def trim_clip_to_last_seconds(file_path: Path | str, duration_seconds: float) ->
 
 
 def trim_half_clip_async(file_path: Path | str, duration_seconds: float, links_enabled: bool, links_folder: str):
-    final_path = trim_clip_to_last_seconds(file_path, duration_seconds)
-    if links_enabled:
-        create_hard_link(final_path, links_folder)
+    try:
+        final_path = trim_clip_to_last_seconds(file_path, duration_seconds)
+        if links_enabled:
+            create_hard_link(final_path, links_folder)
+        VARIABLES.last_saved_clip_path = final_path
+    finally:
+        VARIABLES.save_in_progress = False
 
 
 # -------------------- obs_related.py --------------------
@@ -2667,12 +2675,58 @@ def save_half_buffer():
         reset_forced_save_state()
 
 
+def is_save_in_progress() -> bool:
+    return VARIABLES.save_in_progress or has_pending_forced_save()
+
+
+def cancel_pending_open_request() -> None:
+    VARIABLES.open_last_video_requested = False
+    VARIABLES.open_last_video_wait_ticks = 0
+    with suppress(Exception):
+        obs.timer_remove(open_last_video_wait_callback)
+
+
+def open_last_video_wait_callback() -> None:
+    """
+    Polls until the in-progress replay save finishes (or a safety deadline is
+    reached), then opens the freshly created clip. Runs on the OBS timer thread.
+    """
+    VARIABLES.open_last_video_wait_ticks -= 1
+    if is_save_in_progress() and VARIABLES.open_last_video_wait_ticks > 0:
+        return
+    with suppress(Exception):
+        obs.timer_remove(open_last_video_wait_callback)
+    if VARIABLES.open_last_video_requested:
+        VARIABLES.open_last_video_requested = False
+        open_last_saved_video_now()
+
+
 def open_last_saved_video():
     """
-    Opens the most recently produced video with its default application.
-    Considers the last clip this script saved plus OBS's last recording and
-    last replay, and opens whichever file is newest.
-    Can only be called using hotkeys.
+    Opens the most recently saved video. If a replay save is currently being
+    processed, waits for it to finish first and then opens the just-created clip
+    (without blocking the OBS thread). Can only be called using hotkeys.
+    """
+    if VARIABLES.open_last_video_requested:
+        # Already waiting for an in-progress save; ignore repeated presses.
+        return
+
+    if is_save_in_progress():
+        VARIABLES.open_last_video_requested = True
+        interval = CONSTANTS.OPEN_LAST_VIDEO_WAIT_INTERVAL_MS
+        max_wait_ms = get_forced_save_watchdog_timeout_ms() + 5000
+        VARIABLES.open_last_video_wait_ticks = max(1, (max_wait_ms + interval - 1) // interval)
+        _print("A replay save is in progress; the last video will open once it finishes.")
+        obs.timer_add(open_last_video_wait_callback, interval)
+        return
+
+    open_last_saved_video_now()
+
+
+def open_last_saved_video_now():
+    """
+    Opens the newest existing file among the last clip this script saved,
+    OBS's last recording, and OBS's last replay, with the default application.
     """
     candidates = []
     if VARIABLES.last_saved_clip_path is not None:
@@ -2746,6 +2800,8 @@ def on_buffer_recording_started_callback(event):
     VARIABLES.cached_active_exe = None
     VARIABLES.last_created_clip_folder = None
     VARIABLES.last_links_folder = None
+    VARIABLES.save_in_progress = False
+    cancel_pending_open_request()
     _print(f"Exe history deque created. Maxlen={VARIABLES.clip_exe_history.maxlen}.")
     obs.timer_add(append_clip_exe_history, 1000)
 
@@ -2765,6 +2821,8 @@ def on_buffer_recording_stopped_callback(event):
     VARIABLES.cached_active_exe = None
     VARIABLES.last_created_clip_folder = None
     VARIABLES.last_links_folder = None
+    VARIABLES.save_in_progress = False
+    cancel_pending_open_request()
     reset_forced_save_state()
 
 
@@ -2773,6 +2831,7 @@ def on_buffer_save_callback(event):
         return
 
     _print(f"{'SAVING BUFFER':->50}")
+    VARIABLES.save_in_progress = True
 
     force_override = VARIABLES.force_override_save
     half_buffer_save = VARIABLES.half_buffer_save
@@ -2786,11 +2845,13 @@ def on_buffer_save_callback(event):
         _print(traceback.format_exc())
         notify(False)
         reset_forced_save_state()
+        VARIABLES.save_in_progress = False
         _print("-" * 50)
         return
 
     VARIABLES.last_saved_clip_path = path
 
+    trimming_started = False
     if half_buffer_save:
         short_percent = obs.obs_data_get_int(VARIABLES.script_settings, PN.PROP_SHORT_BUFFER_PERCENT)
         short_percent = min(max(short_percent, 5), 100)
@@ -2803,12 +2864,15 @@ def on_buffer_save_callback(event):
                 args=(path, half_duration, links_enabled, links_folder),
                 daemon=True
             ).start()
+            trimming_started = True
         except Exception:
             _print("Cannot start short-clip trimming thread.")
             _print(traceback.format_exc())
 
     notify(True, path)
     reset_forced_save_state()
+    if not trimming_started:
+        VARIABLES.save_in_progress = False
     _print("-" * 50)
 
 
@@ -3338,6 +3402,8 @@ def script_unload():
     VARIABLES.last_created_clip_folder = None
     VARIABLES.last_links_folder = None
     VARIABLES.last_saved_clip_path = None
+    VARIABLES.save_in_progress = False
+    cancel_pending_open_request()
     reset_forced_save_state()
 
     _print("Script unloaded.")

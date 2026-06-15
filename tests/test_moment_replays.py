@@ -31,6 +31,9 @@ def load_module():
     stub._last_replay = ""
     stub.obs_frontend_get_last_recording = lambda: stub._last_recording
     stub.obs_frontend_get_last_replay = lambda: stub._last_replay
+    stub._timers = {}
+    stub.timer_add = lambda cb, ms: stub._timers.__setitem__(cb, ms)
+    stub.timer_remove = lambda cb: stub._timers.pop(cb, None)
     sys.modules["obspython"] = stub
 
     spec = importlib.util.spec_from_file_location("moment_replays_under_test", MODULE_PATH)
@@ -224,6 +227,9 @@ class TestOpenLastVideo(unittest.TestCase):
         self.opened = []
         ar.os.startfile = lambda p: self.opened.append(p)
         ar.VARIABLES.last_saved_clip_path = None
+        ar.VARIABLES.save_in_progress = False
+        ar.VARIABLES.open_last_video_requested = False
+        ar.VARIABLES.open_last_video_wait_ticks = 0
         ar._obs_stub._last_recording = ""
         ar._obs_stub._last_replay = ""
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -261,6 +267,78 @@ class TestOpenLastVideo(unittest.TestCase):
         ar.VARIABLES.last_saved_clip_path = str(Path(self._tmpdir.name) / "gone.mp4")
         ar.open_last_saved_video()
         self.assertEqual(self.opened, [])
+
+
+class TestOpenLastVideoDeferred(unittest.TestCase):
+    """Pressing the open hotkey while a save is in progress should wait."""
+
+    def setUp(self):
+        self._orig_startfile = getattr(ar.os, "startfile", None)
+        self.opened = []
+        ar.os.startfile = lambda p: self.opened.append(p)
+        ar.VARIABLES.last_saved_clip_path = None
+        ar.VARIABLES.save_in_progress = False
+        ar.VARIABLES.open_last_video_requested = False
+        ar.VARIABLES.open_last_video_wait_ticks = 0
+        ar.VARIABLES.force_override_save = False
+        ar.VARIABLES.half_buffer_save = False
+        ar._obs_stub._last_recording = ""
+        ar._obs_stub._last_replay = ""
+        ar._obs_stub._timers.clear()
+        self._tmpdir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        if self._orig_startfile is not None:
+            ar.os.startfile = self._orig_startfile
+        ar.VARIABLES.save_in_progress = False
+        ar.VARIABLES.open_last_video_requested = False
+        ar.VARIABLES.last_saved_clip_path = None
+        ar._obs_stub._timers.clear()
+        self._tmpdir.cleanup()
+
+    def _file(self, name):
+        p = Path(self._tmpdir.name) / name
+        p.write_bytes(b"x")
+        return str(p)
+
+    def test_defers_while_saving_then_opens_new_clip(self):
+        ar.VARIABLES.save_in_progress = True
+        ar.open_last_saved_video()
+        # Nothing opened yet; a wait timer is registered.
+        self.assertEqual(self.opened, [])
+        self.assertTrue(ar.VARIABLES.open_last_video_requested)
+        self.assertIn(ar.open_last_video_wait_callback, ar._obs_stub._timers)
+        # The save finishes and produces the new clip.
+        new_clip = self._file("new.mp4")
+        ar.VARIABLES.last_saved_clip_path = new_clip
+        ar.VARIABLES.save_in_progress = False
+        ar.open_last_video_wait_callback()  # simulate one OBS timer tick
+        self.assertEqual(len(self.opened), 1)
+        self.assertEqual(os.path.basename(self.opened[0]), "new.mp4")
+        self.assertFalse(ar.VARIABLES.open_last_video_requested)
+        self.assertNotIn(ar.open_last_video_wait_callback, ar._obs_stub._timers)
+
+    def test_repeated_presses_while_saving_are_ignored(self):
+        ar.VARIABLES.save_in_progress = True
+        ar.open_last_saved_video()
+        ar.open_last_saved_video()  # second press during the same save
+        self.assertEqual(self.opened, [])
+        self.assertEqual(len(ar._obs_stub._timers), 1)
+
+    def test_opens_immediately_when_idle(self):
+        clip = self._file("idle.mp4")
+        ar.VARIABLES.last_saved_clip_path = clip
+        ar.open_last_saved_video()
+        self.assertEqual(os.path.basename(self.opened[0]), "idle.mp4")
+        self.assertNotIn(ar.open_last_video_wait_callback, ar._obs_stub._timers)
+
+    def test_wait_deadline_stops_polling(self):
+        ar.VARIABLES.save_in_progress = True
+        ar.open_last_saved_video()
+        ar.VARIABLES.open_last_video_wait_ticks = 1  # force imminent deadline
+        ar.open_last_video_wait_callback()           # still saving, but deadline hit
+        self.assertNotIn(ar.open_last_video_wait_callback, ar._obs_stub._timers)
+        self.assertFalse(ar.VARIABLES.open_last_video_requested)
 
 
 if __name__ == "__main__":

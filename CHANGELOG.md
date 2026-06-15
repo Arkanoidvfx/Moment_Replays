@@ -2,6 +2,13 @@
 
 All notable changes to Moment Replays are documented here.
 
+## v1.3
+- **Open last saved video** now cooperates with in-progress saves: pressing the
+  hotkey while a replay is still being saved (or a short clip is still being
+  trimmed) waits for the save to finish and opens the just-created clip instead
+  of the previous one. Non-blocking — it never freezes OBS — with a safety
+  timeout so the request can't get stuck.
+
 ## v1.2
 - **Cross-platform safety:** the script no longer hard-crashes on import on
   non-Windows OBS. It loads but disables its active features with a clear log
