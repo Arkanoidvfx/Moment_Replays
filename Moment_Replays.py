@@ -43,7 +43,7 @@ user32 = ctypes.windll.user32 if IS_WINDOWS else None
 
 
 class CONSTANTS:
-    VERSION = "1.4"
+    VERSION = "1.5"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -51,6 +51,7 @@ class CONSTANTS:
     UPDATE_CHECK_LOCK = Lock()
     FORCED_SAVE_TIMEOUT_MS = 30000
     OPEN_LAST_VIDEO_WAIT_INTERVAL_MS = 250
+    ALT_RECORDING_WATCHDOG_MS = 8000
     FILENAME_PROHIBITED_CHARS = r'/\:"<>*?|%'
     PATH_PROHIBITED_CHARS = r'"<>*?|%'
     DEFAULT_FILENAME_FORMAT = "%NAME_%d.%m.%Y_%H-%M-%S"
@@ -127,6 +128,9 @@ class VARIABLES:
     save_in_progress = False
     open_last_video_requested = False
     open_last_video_wait_ticks = 0
+    alt_recording_pending = False
+    saved_recording_path: str | None = None
+    alt_recording_watchdog_armed = False
     sidecar_persist_enabled = False
     update_check_in_progress = False
     update_status_props = None
@@ -167,6 +171,8 @@ class PropertiesNames:
     PROP_SHOW_OVERRIDE_FOLDER_SETTINGS = "show_override_folder_settings"
     PROP_CLIPS_OVERRIDE_PATH = "clips_override_path"
     TXT_CLIPS_OVERRIDE_PATH_WARNING = "clips_override_path_warning"
+    PROP_RECORDING_FOLDER = "recording_alt_folder"
+    TXT_RECORDING_FOLDER_DESC = "recording_alt_folder_desc"
     PROP_SHOW_CLIP_NAMING_SETTINGS = "show_clip_naming_settings"
     PROP_CLIPS_NAMING_MODE = "clips_naming_mode"
     TXT_CLIPS_HOTKEY_TIP = "clips_hotkey_tip"
@@ -229,6 +235,7 @@ class PropertiesNames:
     HK_SAVE_BUFFER_HALF = "save_buffer_half"
     HK_SAVE_BUFFER_OVERRIDE = "save_buffer_override_folder"
     HK_OPEN_LAST_VIDEO = "open_last_video"
+    HK_RECORD_ALT = "record_alternative_folder"
 
 PN = PropertiesNames
 
@@ -236,6 +243,7 @@ PERSISTED_STRING_DEFAULTS = {
     PN.PROP_INTERFACE_LANGUAGE: "en",
     PN.PROP_CLIPS_BASE_PATH: "",
     PN.PROP_CLIPS_OVERRIDE_PATH: "",
+    PN.PROP_RECORDING_FOLDER: "",
     PN.PROP_CLIPS_FILENAME_TEMPLATE: CONSTANTS.DEFAULT_FILENAME_FORMAT,
     PN.PROP_CLIPS_LINKS_FOLDER_PATH: str(CONSTANTS.DEFAULT_LINKS_PATH),
     PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH: str(CONSTANTS.DEFAULT_SUCCESS_SOUND_PATH),
@@ -301,6 +309,11 @@ UI_TEXT = {
         "same_drive_warning": "Use the same drive as the OBS recording path.",
         "show_override_folder_settings": "Alternative recording modes",
         "override_folder": "Alternative save folder",
+        "recording_folder": "Recording folder",
+        "recording_folder_desc": (
+            "The alternative-record hotkey saves the full OBS recording to this folder "
+            "(any drive). Leave empty to use the OBS recording path."
+        ),
         "short_clip_duration": "Shortened clip",
         "short_clip_duration_desc": (
             "The short-clip hotkey keeps the last N% of the replay buffer. Example: 40% of 1 minute = 24 seconds. "
@@ -415,6 +428,11 @@ UI_TEXT = {
         "same_drive_warning": "Должно быть на том же диске, что и путь записи OBS.",
         "show_override_folder_settings": "Альтернативные режимы записи",
         "override_folder": "Папка альтернативного сохранения",
+        "recording_folder": "Папка записей",
+        "recording_folder_desc": (
+            "Хоткей альтернативной записи сохраняет полную запись OBS в эту папку "
+            "(любой диск). Пусто — используется путь записи OBS."
+        ),
         "short_clip_duration": "Укороченный клип",
         "short_clip_duration_desc": (
             "Хоткей короткого клипа оставляет последние N% replay buffer. Пример: 40% от 1 минуты = 24 секунды. "
@@ -948,6 +966,8 @@ def refresh_localized_properties(props, data=None) -> None:
                              tr("show_override_folder_settings", data=data))
     set_property_description(clip_paths, PN.PROP_CLIPS_OVERRIDE_PATH, tr("override_folder", data=data))
     set_property_description(clip_paths, PN.TXT_CLIPS_OVERRIDE_PATH_WARNING, tr("same_drive_warning", data=data))
+    set_property_description(clip_paths, PN.PROP_RECORDING_FOLDER, tr("recording_folder", data=data))
+    set_property_description(clip_paths, PN.TXT_RECORDING_FOLDER_DESC, tr("recording_folder_desc", data=data))
     set_property_description(clip_paths, PN.PROP_SHORT_BUFFER_PERCENT, tr("short_clip_duration", data=data))
     set_property_description(clip_paths, PN.TXT_SHORT_BUFFER_PERCENT_DESC, tr("short_clip_duration_desc", data=data))
     set_property_description(clip_paths, PN.PROP_CLIPS_CREATE_LINKS, tr("create_hard_links", data=data))
@@ -1088,6 +1108,30 @@ def setup_clip_paths_settings(group_obj):
         obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
     )
 
+    # ----- Alternative full-recording folder (Alt + record hotkey) -----
+    recording_folder_prop = obs.obs_properties_add_path(
+        props=group_obj,
+        name=PN.PROP_RECORDING_FOLDER,
+        description=tr("recording_folder"),
+        type=obs.OBS_PATH_DIRECTORY,
+        filter=None,
+        default_path=str(CONSTANTS.DEFAULT_CLIPS_BASE_PATH)
+    )
+    recording_folder_desc = obs.obs_properties_add_text(
+        props=group_obj,
+        name=PN.TXT_RECORDING_FOLDER_DESC,
+        description=tr("recording_folder_desc"),
+        type=obs.OBS_TEXT_INFO
+    )
+    obs.obs_property_set_visible(
+        recording_folder_prop,
+        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
+    )
+    obs.obs_property_set_visible(
+        recording_folder_desc,
+        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
+    )
+
     # ----- Create links -----
     create_links_prop = obs.obs_properties_add_bool(
         props=group_obj,
@@ -1129,6 +1173,7 @@ def setup_clip_paths_settings(group_obj):
     obs.obs_property_set_modified_callback(show_override_folder_prop, update_override_path_prop_visibility)
     obs.obs_property_set_modified_callback(override_path_prop, check_override_path_callback)
     obs.obs_property_set_modified_callback(short_buffer_prop, persist_settings_callback)
+    obs.obs_property_set_modified_callback(recording_folder_prop, persist_settings_callback)
     obs.obs_property_set_modified_callback(create_links_prop, update_links_path_prop_visibility)
     obs.obs_property_set_modified_callback(links_path_prop, check_clips_links_folder_path_callback)
 
@@ -1719,12 +1764,16 @@ def update_override_path_prop_visibility(p, prop, data):
     path_warn_prop = obs.obs_properties_get(p, PN.TXT_CLIPS_OVERRIDE_PATH_WARNING)
     short_buffer_prop = obs.obs_properties_get(p, PN.PROP_SHORT_BUFFER_PERCENT)
     short_buffer_desc = obs.obs_properties_get(p, PN.TXT_SHORT_BUFFER_PERCENT_DESC)
+    recording_folder_prop = obs.obs_properties_get(p, PN.PROP_RECORDING_FOLDER)
+    recording_folder_desc = obs.obs_properties_get(p, PN.TXT_RECORDING_FOLDER_DESC)
     is_visible = obs.obs_data_get_bool(data, obs.obs_property_name(prop))
 
     obs.obs_property_set_visible(path_prop, is_visible)
     obs.obs_property_set_visible(path_warn_prop, is_visible)
     obs.obs_property_set_visible(short_buffer_prop, is_visible)
     obs.obs_property_set_visible(short_buffer_desc, is_visible)
+    obs.obs_property_set_visible(recording_folder_prop, is_visible)
+    obs.obs_property_set_visible(recording_folder_desc, is_visible)
     save_persisted_settings_from_obs_data(data)
     return True
 
@@ -2261,6 +2310,111 @@ def get_base_path(script_settings: Any | None = None) -> Path:
         return Path(get_obs_config("AdvOut", "RecFilePath"))
 
 
+# -------------------- alt_recording.py --------------------
+def get_obs_recording_path_keys() -> tuple[str, str]:
+    """Returns the (section, key) of the OBS recording path for the active output mode."""
+    if get_obs_config("Output", "Mode") == "Simple":
+        return "SimpleOutput", "FilePath"
+    return "AdvOut", "RecFilePath"
+
+
+def read_obs_recording_path() -> str:
+    section, key = get_obs_recording_path_keys()
+    return get_obs_config(section, key) or ""
+
+
+def set_obs_recording_path(path_str: str) -> bool:
+    """Sets the OBS recording path in the (in-memory) profile config."""
+    section, key = get_obs_recording_path_keys()
+    try:
+        obs.config_set_string(get_obs_config(), section, key, path_str)
+        return True
+    except Exception:
+        _print("Cannot change the OBS recording path.")
+        _print(traceback.format_exc())
+        return False
+
+
+def restore_recording_path() -> None:
+    """Restores the OBS recording path saved before an alternative recording."""
+    if VARIABLES.saved_recording_path is None:
+        return
+    set_obs_recording_path(VARIABLES.saved_recording_path)
+    _print(f"Restored OBS recording path to {VARIABLES.saved_recording_path}")
+    VARIABLES.saved_recording_path = None
+
+
+def resolve_recording_alt_folder() -> Path:
+    raw = obs.obs_data_get_string(VARIABLES.script_settings, PN.PROP_RECORDING_FOLDER)
+    if raw:
+        return Path(raw)
+    return get_base_path(script_settings=VARIABLES.script_settings)
+
+
+def cancel_alt_recording_watchdog() -> None:
+    VARIABLES.alt_recording_watchdog_armed = False
+    with suppress(Exception):
+        obs.timer_remove(alt_recording_watchdog_callback)
+
+
+def arm_alt_recording_watchdog() -> None:
+    cancel_alt_recording_watchdog()
+    obs.timer_add(alt_recording_watchdog_callback, CONSTANTS.ALT_RECORDING_WATCHDOG_MS)
+    VARIABLES.alt_recording_watchdog_armed = True
+
+
+def alt_recording_watchdog_callback() -> None:
+    """
+    Safety net: if an alternative recording was requested but recording never
+    became active, undo the recording-path override so normal recordings are
+    not silently redirected. Runs on the OBS timer thread.
+    """
+    cancel_alt_recording_watchdog()
+    if obs.obs_frontend_recording_active():
+        return
+    if VARIABLES.saved_recording_path is not None:
+        _print("Alternative recording did not start; restoring the OBS recording path.")
+        restore_recording_path()
+    VARIABLES.alt_recording_pending = False
+
+
+def toggle_alt_recording_save():
+    """
+    Starts a full OBS recording redirected into the alternative recording folder,
+    or stops the current recording. Can only be called using hotkeys.
+    """
+    if not obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS):
+        return
+
+    if obs.obs_frontend_recording_active():
+        obs.obs_frontend_recording_stop()
+        return
+
+    alt_folder = resolve_recording_alt_folder()
+    try:
+        os.makedirs(str(alt_folder), exist_ok=True)
+    except Exception:
+        _print(f"Cannot create the alternative recording folder {alt_folder}. Aborting.")
+        _print(traceback.format_exc())
+        return
+
+    VARIABLES.saved_recording_path = read_obs_recording_path()
+    if not set_obs_recording_path(str(alt_folder)):
+        VARIABLES.saved_recording_path = None
+        return
+
+    VARIABLES.alt_recording_pending = True
+    _print(f"Starting alternative recording into {alt_folder}")
+    try:
+        obs.obs_frontend_recording_start()
+        arm_alt_recording_watchdog()
+    except Exception:
+        _print("Cannot start the alternative recording.")
+        _print(traceback.format_exc())
+        restore_recording_path()
+        VARIABLES.alt_recording_pending = False
+
+
 # -------------------- script_helpers.py --------------------
 def notify(success: bool, clip_path: Path | None = None, *, play_audio: bool = True):
     """
@@ -2771,6 +2925,11 @@ def on_recording_started_callback(event):
     if event != obs.OBS_FRONTEND_EVENT_RECORDING_STARTED:
         return
 
+    # The recording is live and has captured its output path. Restore the OBS
+    # recording path now so the NEXT (normal) recording is not redirected.
+    cancel_alt_recording_watchdog()
+    restore_recording_path()
+
     play_recording_sound_notification(
         PN.PROP_NOTIFY_RECORDING_ON_START,
         PN.PROP_NOTIFY_RECORDING_ON_START_PATH
@@ -2780,6 +2939,19 @@ def on_recording_started_callback(event):
 def on_recording_stopped_callback(event):
     if event != obs.OBS_FRONTEND_EVENT_RECORDING_STOPPED:
         return
+
+    # Safety: undo any lingering path override (e.g. if start failed mid-way).
+    cancel_alt_recording_watchdog()
+    restore_recording_path()
+
+    if VARIABLES.alt_recording_pending:
+        VARIABLES.alt_recording_pending = False
+        with suppress(Exception):
+            getter = getattr(obs, "obs_frontend_get_last_recording", None)
+            last_recording = getter() if getter else None
+            if last_recording:
+                VARIABLES.last_saved_clip_path = Path(last_recording)
+                _print(f"Alternative recording saved at {last_recording}")
 
     play_recording_sound_notification(
         PN.PROP_NOTIFY_RECORDING_ON_STOP,
@@ -2927,7 +3099,10 @@ def load_hotkeys():
          lambda pressed: save_buffer_to_override_folder() if pressed else None),
 
         (PN.HK_OPEN_LAST_VIDEO, "[Moment Replays] Open last saved video",
-         lambda pressed: open_last_saved_video() if pressed else None)
+         lambda pressed: open_last_saved_video() if pressed else None),
+
+        (PN.HK_RECORD_ALT, "[Moment Replays] Start/stop recording (alternative folder)",
+         lambda pressed: toggle_alt_recording_save() if pressed else None)
     )
 
     for key_name, key_desc, key_callback in keys:
@@ -3366,6 +3541,8 @@ def script_load(script_settings):
     VARIABLES.forced_save_watchdog_timeout_ms = 0
     VARIABLES.last_created_clip_folder = None
     VARIABLES.last_links_folder = None
+    VARIABLES.alt_recording_pending = False
+    VARIABLES.saved_recording_path = None
     json_settings = json.loads(obs.obs_data_get_json(script_settings))
     try:
         load_aliases(json_settings)
@@ -3407,6 +3584,9 @@ def script_unload():
     VARIABLES.last_saved_clip_path = None
     VARIABLES.save_in_progress = False
     cancel_pending_open_request()
+    restore_recording_path()
+    cancel_alt_recording_watchdog()
+    VARIABLES.alt_recording_pending = False
     reset_forced_save_state()
 
     _print("Script unloaded.")

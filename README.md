@@ -20,7 +20,9 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
 - **Sound notifications** on clip save success/failure and on recording start/stop.
 - **Short clips** — a hotkey that keeps only the last *N%* of the replay buffer
   (trimmed losslessly with ffmpeg stream-copy).
-- **Alternative save folder** — a hotkey that saves the next clip to a separate folder.
+- **Alternative save folder** — a hotkey that saves the next replay clip to a separate folder.
+- **Alternative recording** — a hotkey that records a full OBS recording (not the replay buffer)
+  straight into a separate folder of your choice, on any drive.
 - **Hard links** — optionally mirror each clip into a links folder (same drive).
 - **Bilingual UI** — English / Russian, switchable in the script settings.
 - **Update checks** against GitHub releases.
@@ -46,15 +48,21 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
 The script works with OBS's normal **Save Replay** action — naming, sorting, and
 notifications are applied automatically whenever a replay is saved.
 
-It also registers three extra actions, bindable under **Settings → Hotkeys**:
+It also registers four extra actions, bindable under **Settings → Hotkeys**:
 
 - **Save short clip** — saves a replay trimmed to the last *N%* of the buffer.
-- **Save buffer (alternative folder)** — saves the next clip to the alternative folder.
+- **Save buffer (alternative folder)** — saves the next replay clip to the alternative folder.
 - **Open last saved video** — opens the most recently saved clip or recording in your default player.
+- **Start/stop recording (alternative folder)** — records a full OBS recording into the
+  configured *Recording folder* instead of the OBS default path.
 
 Suggested defaults: `Ctrl+F10` for the short clip and `Alt+F10` for the
-alternative folder (the open-last-video action has no default — bind it yourself).
-Change them freely in OBS hotkey settings.
+alternative folder. The open-last-video and alternative-recording actions have no
+default — bind them yourself (e.g. `Alt+F9` for alternative recording, next to your
+normal record key). Change them freely in OBS hotkey settings.
+
+> The two *alternative* hotkeys and the *Recording folder* only work when
+> **Alternative recording modes** is enabled in the script settings.
 
 ## Settings
 

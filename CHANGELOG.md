@@ -2,6 +2,14 @@
 
 All notable changes to Moment Replays are documented here.
 
+## v1.5
+- New **Alternative recording** hotkey: records a full OBS recording (not the
+  replay buffer) directly into a separate *Recording folder* chosen in the script
+  settings — on any drive. Works by switching the OBS recording path only for that
+  recording and restoring it immediately, so normal recordings are never affected
+  (no file moving, so OBS remux/auto-split keep working). Bind it next to your
+  normal record key (e.g. `Alt+F9`). Requires **Alternative recording modes** enabled.
+
 ## v1.4
 - Renamed the script file `arkanoid_replays.py` → `Moment_Replays.py`. Existing
   settings are preserved: the settings file is now `Moment_Replays.settings.json`,
