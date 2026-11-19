@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 import os
+import struct
 import subprocess
 import time
 import winsound
@@ -3421,8 +3422,55 @@ def get_replay_clip_duration(clip_end: float) -> float:
     return min(float(max_time), elapsed) if max_time else elapsed
 
 
+def _find_mp4_box(f, start: int, end: int, box_type: bytes) -> tuple[int, int] | None:
+    """(payload start, box end) of the first `box_type` box between start and end, or None."""
+    pos = start
+    while pos + 8 <= end:
+        f.seek(pos)
+        size, kind = struct.unpack(">I4s", f.read(8))
+        payload = pos + 8
+        if size == 1:  # 64-bit size
+            size = struct.unpack(">Q", f.read(8))[0]
+            payload += 8
+        elif size == 0:  # box runs to the end
+            size = end - pos
+        if size < payload - pos:
+            return None
+        if kind == box_type:
+            return payload, min(pos + size, end)
+        pos += size
+    return None
+
+
+def read_mp4_duration(path: Path | str) -> float | None:
+    """
+    Real length of a finished MP4 from its moov/mvhd box (no ffprobe needed): headers only,
+    the media data is skipped. None for other containers, unfinished files or any error.
+    """
+    try:
+        with open(path, "rb") as f:
+            moov = _find_mp4_box(f, 0, os.fstat(f.fileno()).st_size, b"moov")
+            mvhd = moov and _find_mp4_box(f, moov[0], moov[1], b"mvhd")
+            if not mvhd:
+                return None
+            f.seek(mvhd[0])
+            if f.read(4)[0] == 1:  # version 1: 64-bit times
+                f.seek(16, os.SEEK_CUR)
+                timescale, duration = struct.unpack(">IQ", f.read(12))
+            else:
+                f.seek(8, os.SEEK_CUR)
+                timescale, duration = struct.unpack(">II", f.read(8))
+            return duration / timescale if timescale and duration else None
+    except (OSError, struct.error, IndexError):
+        return None
+
+
 def collect_moment_metadata(origin: str, clip_end: float, duration: float, output_getter_name: str) -> dict | None:
-    """Builds the .moment.json payload (UI thread). Never raises: metadata must not break a save."""
+    """
+    Snapshot of everything the .moment.json needs, i.e. the build_moment_metadata() arguments
+    (UI thread: all OBS reads happen here). `duration` is only the estimate used when the saved
+    file's real length can't be read. Never raises: metadata must not break a save.
+    """
     if not obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_WRITE_MOMENT_METADATA):
         return None
     try:
@@ -3432,17 +3480,17 @@ def collect_moment_metadata(origin: str, clip_end: float, duration: float, outpu
         preset = dict.fromkeys(RECORDING_PRESET_KEYS)
         with suppress(Exception):
             preset = get_recording_preset(output_getter_name)
-        return build_moment_metadata(
-            origin=origin,
-            clip_end=clip_end,
-            duration=duration,
-            timeline_log=list(VARIABLES.timeline_log),  # snapshot: the sampler appends on another thread
-            markers=list(VARIABLES.moment_markers),
-            game_scene=obs.obs_data_get_string(VARIABLES.script_settings, PN.PROP_AUTO_SCENE_GAME),
-            audio_tracks=audio_tracks,
-            recording_preset=preset,
-            obs_version=CONSTANTS.OBS_VERSION_STRING,
-        )
+        return {
+            "origin": origin,
+            "clip_end": clip_end,
+            "duration": duration,
+            "timeline_log": list(VARIABLES.timeline_log),  # snapshot: the sampler appends on another thread
+            "markers": list(VARIABLES.moment_markers),
+            "game_scene": obs.obs_data_get_string(VARIABLES.script_settings, PN.PROP_AUTO_SCENE_GAME),
+            "audio_tracks": audio_tracks,
+            "recording_preset": preset,
+            "obs_version": CONSTANTS.OBS_VERSION_STRING,
+        }
     except Exception:
         _print("Cannot collect moment metadata; the clip itself is saved.")
         _print(traceback.format_exc())
@@ -3454,11 +3502,18 @@ def moment_metadata_path(clip_path: Path | str) -> Path:
     return clip_path.with_name(clip_path.stem + CONSTANTS.MOMENT_METADATA_SUFFIX)
 
 
-def write_moment_metadata(clip_path: Path | str | None, payload: dict | None) -> None:
-    """Writes <clip basename>.moment.json next to the final clip, atomically. Never raises."""
-    if payload is None or not clip_path:
+def write_moment_metadata(clip_path: Path | str | None, inputs: dict | None) -> None:
+    """
+    Builds <clip basename>.moment.json from collect_moment_metadata() inputs and writes it next
+    to the final clip, atomically. Uses the file's real length: the replay buffer starts a clip on
+    a keyframe, so a "35 s" clip is often 1-4 s shorter, and every `t` must count from its real
+    first frame (the clip end, the save moment, is the fixed point). Never raises.
+    """
+    if inputs is None or not clip_path:
         return
     try:
+        real_duration = read_mp4_duration(clip_path)
+        payload = build_moment_metadata(**{**inputs, "duration": real_duration or inputs["duration"]})
         path = moment_metadata_path(clip_path)
         write_json_atomic(path, payload)
         _print(f"Moment metadata saved at {path}")

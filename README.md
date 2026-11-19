@@ -98,8 +98,11 @@ Bundled sounds are pre-selected for convenience; replace them with your own
 ## Clip metadata (`.moment.json`)
 
 Written next to the final clip as `<clip basename>.moment.json` (schema
-`moment.clip/1`). `t` values are seconds from the clip start (±1 s: the app
-timeline is sampled once per second).
+`moment.clip/1`). `t` values are seconds from the clip's first frame and
+`duration_s` is the clip's real length, read from the saved MP4 (a replay starts
+on a keyframe, so it is often a few seconds shorter than the buffer setting).
+Markers are accurate to about half a second; the app timeline is sampled once
+per second.
 
 ```json
 {"schema":"moment.clip/1","origin":"replay_buffer","saved_at":"2026-11-19T21:04:05+01:00","duration_s":35.0,
