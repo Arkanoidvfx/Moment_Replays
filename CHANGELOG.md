@@ -2,6 +2,26 @@
 
 All notable changes to Moment Replays are documented here.
 
+## v1.6
+- **Auto scene (Game / Desktop)** — optional replacement for an Advanced Scene
+  Switcher macro. Shows the `Game` scene once the `Game Capture` source
+  (game capture, *any fullscreen* mode) has hooked the fullscreen foreground
+  game, and goes back to `Desktop` on unhook or ~1.5 s after the game loses
+  focus/fullscreen. The capture is kept hookable while `Desktop` is on air, so
+  the switch never shows black frames. Off by default; it only runs when the
+  setting is on **and** both scenes and the source exist. Existing settings
+  files are migrated with it **off** (settings schema 6).
+- **`.moment.json` metadata** next to every saved clip and recording (replay
+  buffer, short clip, alternative folder, recordings, alternative recordings):
+  the game, an app/scene timeline, markers, recorded audio tracks and the
+  encoder preset — for Moment Player. Written atomically; a metadata error
+  never affects the clip. Contains no absolute paths or window titles.
+  Toggle: *Save .moment.json next to clips* (on by default).
+- **Mark moment** hotkey (default `F8`) — drops a marker; on save, markers
+  inside the clip become annotations. Plays a short blip of the success sound.
+- **Open last saved video** now defaults to `Ctrl+Alt+F10` (only when it was
+  never bound before).
+
 ## v1.5
 - New **Alternative recording** hotkey: records a full OBS recording (not the
   replay buffer) directly into a separate *Recording folder* chosen in the script

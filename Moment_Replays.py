@@ -22,6 +22,7 @@ import urllib.request
 import webbrowser
 import os
 import subprocess
+import time
 import winsound
 from enum import Enum
 from threading import Lock
@@ -43,7 +44,7 @@ user32 = ctypes.windll.user32 if IS_WINDOWS else None
 
 
 class CONSTANTS:
-    VERSION = "1.5"
+    VERSION = "1.6"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -52,6 +53,13 @@ class CONSTANTS:
     FORCED_SAVE_TIMEOUT_MS = 30000
     OPEN_LAST_VIDEO_WAIT_INTERVAL_MS = 250
     ALT_RECORDING_WATCHDOG_MS = 8000
+    FOREGROUND_TICK_MS = 1000
+    AUTO_SCENE_DEBOUNCE_S = 1.5
+    MARK_FEEDBACK_MS = 200
+    TIMELINE_LOG_MAXLEN = 10000
+    MARKERS_MAXLEN = 1000
+    MOMENT_SCHEMA = "moment.clip/1"
+    MOMENT_METADATA_SUFFIX = ".moment.json"
     FILENAME_PROHIBITED_CHARS = r'/\:"<>*?|%'
     PATH_PROHIBITED_CHARS = r'"<>*?|%'
     DEFAULT_FILENAME_FORMAT = "%NAME_%d.%m.%Y_%H-%M-%S"
@@ -68,7 +76,7 @@ class CONSTANTS:
     DEFAULT_RECORDING_STOP_SOUND_PATH = SCRIPT_DIR / "Recording_Stoped.wav"
     SETTINGS_PERSIST_PATH = Path(__file__).with_name("Moment_Replays.settings.json")
     LEGACY_SETTINGS_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.settings.json")
-    SETTINGS_SCHEMA_VERSION = 5
+    SETTINGS_SCHEMA_VERSION = 6
     LEGACY_APP_RULES_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.app_rules.json")
     GITHUB_PROJECT_URL = "https://github.com/Arkanoidvfx/Moment_Replays"
     GITHUB_LATEST_RELEASE_URL = f"{GITHUB_PROJECT_URL}/releases/latest"
@@ -131,6 +139,17 @@ class VARIABLES:
     alt_recording_pending = False
     saved_recording_path: str | None = None
     alt_recording_watchdog_armed = False
+    # Moment metadata: (wall_ts, app, exe, scene) change points, F8 marker wall times.
+    timeline_log: deque = deque(maxlen=CONSTANTS.TIMELINE_LOG_MAXLEN)
+    moment_markers: deque = deque(maxlen=CONSTANTS.MARKERS_MAXLEN)
+    buffer_started_at: float | None = None
+    recording_started_at: float | None = None
+    # Auto scene (Game/Desktop)
+    auto_scene_machine = None
+    auto_scene_source = None
+    auto_scene_blocked = False
+    auto_scene_switch_in_flight = False
+    auto_scene_status = ""
     sidecar_persist_enabled = False
     update_check_in_progress = False
     update_status_props = None
@@ -164,6 +183,16 @@ class PropertiesNames:
     GR_SOUND_NOTIFICATION_SETTINGS = "sound_notification_settings"
     GR_ALIASES_SETTINGS = "aliases_settings"
     GR_UPDATE_SETTINGS = "update_settings"
+    GR_MOMENT_SETTINGS = "moment_settings"
+
+    # Moment capture settings (shared contract with the installer and Moment Player)
+    PROP_AUTO_SCENE_ENABLED = "auto_scene_enabled"
+    TXT_AUTO_SCENE_DESC = "auto_scene_desc"
+    PROP_AUTO_SCENE_GAME = "auto_scene_game"
+    PROP_AUTO_SCENE_DESKTOP = "auto_scene_desktop"
+    PROP_AUTO_SCENE_GAME_SOURCE = "auto_scene_game_source"
+    PROP_WRITE_MOMENT_METADATA = "write_moment_metadata"
+    TXT_WRITE_MOMENT_METADATA_DESC = "write_moment_metadata_desc"
 
     # Clips path settings
     PROP_CLIPS_BASE_PATH = "clips_base_path"
@@ -236,8 +265,17 @@ class PropertiesNames:
     HK_SAVE_BUFFER_OVERRIDE = "save_buffer_override_folder"
     HK_OPEN_LAST_VIDEO = "open_last_video"
     HK_RECORD_ALT = "record_alternative_folder"
+    HK_MARK_MOMENT = "mark_moment"
 
 PN = PropertiesNames
+
+# Default bindings applied only when OBS has no saved binding for the hotkey yet.
+HOTKEY_DEFAULTS = {
+    PN.HK_SAVE_BUFFER_HALF: ("OBS_KEY_F10", {"control": True}),
+    PN.HK_SAVE_BUFFER_OVERRIDE: ("OBS_KEY_F10", {"alt": True}),
+    PN.HK_OPEN_LAST_VIDEO: ("OBS_KEY_F10", {"control": True, "alt": True}),
+    PN.HK_MARK_MOMENT: ("OBS_KEY_F8", {}),
+}
 
 PERSISTED_STRING_DEFAULTS = {
     PN.PROP_INTERFACE_LANGUAGE: "en",
@@ -252,6 +290,9 @@ PERSISTED_STRING_DEFAULTS = {
     PN.PROP_NOTIFY_RECORDING_ON_STOP_PATH: str(CONSTANTS.DEFAULT_RECORDING_STOP_SOUND_PATH),
     PN.PROP_ALIASES_IMPORT_PATH: "",
     PN.PROP_ALIASES_EXPORT_PATH: "",
+    PN.PROP_AUTO_SCENE_GAME: "Game",
+    PN.PROP_AUTO_SCENE_DESKTOP: "Desktop",
+    PN.PROP_AUTO_SCENE_GAME_SOURCE: "Game Capture",
 }
 
 PERSISTED_BOOL_DEFAULTS = {
@@ -264,6 +305,9 @@ PERSISTED_BOOL_DEFAULTS = {
     PN.PROP_NOTIFY_RECORDING_ON_STOP: False,
     PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS: True,
     PN.PROP_SHOW_CLIP_NAMING_SETTINGS: False,
+    # Opt-in: only the installer's fresh sidecar turns it on (see load_persisted_settings).
+    PN.PROP_AUTO_SCENE_ENABLED: False,
+    PN.PROP_WRITE_MOMENT_METADATA: True,
 }
 
 PERSISTED_INT_DEFAULTS = {
@@ -296,7 +340,7 @@ UI_TEXT = {
     "en": {
         "script_description_summary": (
             "Save replay clips with app or scene names, path and .exe rules, Other folder routing, "
-            "sounds, short clips, and update checks."
+            "sounds, short clips, Game/Desktop auto scenes, .moment.json metadata, and update checks."
         ),
         "interface_language": "Interface language",
         "hotkey_settings_tip": "All hotkeys can be changed in OBS Settings -> Hotkeys.",
@@ -411,11 +455,22 @@ UI_TEXT = {
         "update_status_http_error": "Update check failed: GitHub returned HTTP {code}.",
         "update_status_failed": "Update check failed: {error}",
         "update_status_thread_failed": "Cannot start update check thread.",
+        "group_moments": "Moments",
+        "auto_scene_enabled": "Auto-switch Game / Desktop scenes",
+        "auto_scene_desc": (
+            "Shows scene \"{game}\" once \"{source}\" has hooked a fullscreen game, otherwise \"{desktop}\". "
+            "Stays off unless both scenes and the game capture source exist."
+        ),
+        "write_moment_metadata": "Save .moment.json next to clips",
+        "write_moment_metadata_desc": (
+            "Game, app timeline, Mark-moment markers, audio tracks and encoder settings for Moment Player."
+        ),
     },
     "ru": {
         "script_description_summary": (
             "Сохраняет replay-клипы с именами по приложениям или сценам, правилами по путям и .exe, "
-            "папкой Other, звуками, короткими клипами и проверкой обновлений."
+            "папкой Other, звуками, короткими клипами, автосценами Game/Desktop, метаданными .moment.json "
+            "и проверкой обновлений."
         ),
         "interface_language": "Язык интерфейса",
         "hotkey_settings_tip": "Все хоткеи можно изменить в OBS: Settings -> Hotkeys.",
@@ -530,6 +585,16 @@ UI_TEXT = {
         "update_status_http_error": "Проверка обновлений не удалась: GitHub вернул HTTP {code}.",
         "update_status_failed": "Проверка обновлений не удалась: {error}",
         "update_status_thread_failed": "Не удалось запустить поток проверки обновлений.",
+        "group_moments": "Моменты",
+        "auto_scene_enabled": "Автопереключение сцен Game / Desktop",
+        "auto_scene_desc": (
+            "Показывает сцену \"{game}\", когда \"{source}\" захватил полноэкранную игру, иначе \"{desktop}\". "
+            "Не работает, пока нет обеих сцен и источника захвата игры."
+        ),
+        "write_moment_metadata": "Сохранять .moment.json рядом с клипами",
+        "write_moment_metadata_desc": (
+            "Игра, хронология приложений, метки «Отметить момент», аудиодорожки и настройки энкодера для Moment Player."
+        ),
     },
 }
 
@@ -997,6 +1062,13 @@ def refresh_localized_properties(props, data=None) -> None:
     set_property_description(notifications, PN.PROP_NOTIFY_RECORDING_ON_STOP_PATH,
                              tr("play_recording_stop_path", data=data))
 
+    set_property_description(props, PN.GR_MOMENT_SETTINGS, tr("group_moments", data=data))
+    moments = get_group_content(props, PN.GR_MOMENT_SETTINGS)
+    set_property_description(moments, PN.PROP_AUTO_SCENE_ENABLED, tr("auto_scene_enabled", data=data))
+    set_property_description(moments, PN.TXT_AUTO_SCENE_DESC, auto_scene_desc_text(data))
+    set_property_description(moments, PN.PROP_WRITE_MOMENT_METADATA, tr("write_moment_metadata", data=data))
+    set_property_description(moments, PN.TXT_WRITE_MOMENT_METADATA_DESC, tr("write_moment_metadata_desc", data=data))
+
     app_rules = get_group_content(props, PN.GR_ALIASES_SETTINGS)
     set_property_description(app_rules, PN.TXT_ALIASES_DESC, tr("path_specific_names_desc", data=data))
     set_property_description(app_rules, PN.TXT_ALIASES_INVALID_CHARACTERS, tr("alias_invalid_chars", data=data))
@@ -1461,6 +1533,44 @@ def setup_app_name_rules_settings(group_obj):
     obs.obs_property_set_modified_callback(replacement_list, update_name_replacements_callback)
 
 
+def auto_scene_desc_text(data=None) -> str:
+    settings = data if data is not None else VARIABLES.script_settings
+    return tr(
+        "auto_scene_desc",
+        data=data,
+        game=obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_GAME),
+        desktop=obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_DESKTOP),
+        source=obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_GAME_SOURCE),
+    )
+
+
+def setup_moment_settings(group_obj):
+    auto_scene_prop = obs.obs_properties_add_bool(
+        props=group_obj,
+        name=PN.PROP_AUTO_SCENE_ENABLED,
+        description=tr("auto_scene_enabled")
+    )
+    obs.obs_properties_add_text(
+        props=group_obj,
+        name=PN.TXT_AUTO_SCENE_DESC,
+        description=auto_scene_desc_text(),
+        type=obs.OBS_TEXT_INFO
+    )
+    metadata_prop = obs.obs_properties_add_bool(
+        props=group_obj,
+        name=PN.PROP_WRITE_MOMENT_METADATA,
+        description=tr("write_moment_metadata")
+    )
+    obs.obs_properties_add_text(
+        props=group_obj,
+        name=PN.TXT_WRITE_MOMENT_METADATA_DESC,
+        description=tr("write_moment_metadata_desc"),
+        type=obs.OBS_TEXT_INFO
+    )
+    obs.obs_property_set_modified_callback(auto_scene_prop, persist_settings_callback)
+    obs.obs_property_set_modified_callback(metadata_prop, persist_settings_callback)
+
+
 def setup_update_settings(group_obj):
     obs.obs_properties_add_text(
         props=group_obj,
@@ -1492,12 +1602,14 @@ def script_properties():
     update_gr = obs.obs_properties_create()
     clip_path_gr = obs.obs_properties_create()
     clip_naming_gr = obs.obs_properties_create()
+    moment_gr = obs.obs_properties_create()
     notification_gr = obs.obs_properties_create()
     app_rules_gr = obs.obs_properties_create()
 
     obs.obs_properties_add_group(p, PN.GR_UPDATE_SETTINGS, tr("group_updates"), obs.OBS_GROUP_NORMAL, update_gr)
     obs.obs_properties_add_group(p, PN.GR_CLIPS_PATH_SETTINGS, tr("group_clip_paths"), obs.OBS_GROUP_NORMAL, clip_path_gr)
     obs.obs_properties_add_group(p, PN.GR_CLIP_NAMING_SETTINGS, tr("group_clip_naming"), obs.OBS_GROUP_NORMAL, clip_naming_gr)
+    obs.obs_properties_add_group(p, PN.GR_MOMENT_SETTINGS, tr("group_moments"), obs.OBS_GROUP_NORMAL, moment_gr)
     notification_group_prop = obs.obs_properties_add_group(p, PN.GR_SOUND_NOTIFICATION_SETTINGS, tr("group_sound_notifications"), obs.OBS_GROUP_CHECKABLE, notification_gr)
     obs.obs_properties_add_group(p, PN.GR_ALIASES_SETTINGS, tr("group_app_naming_rules"), obs.OBS_GROUP_NORMAL, app_rules_gr)
 
@@ -1505,6 +1617,7 @@ def script_properties():
     setup_update_settings(update_gr)
     setup_clip_paths_settings(clip_path_gr)
     setup_clip_naming_settings(clip_naming_gr)
+    setup_moment_settings(moment_gr)
     setup_notifications_settings(notification_gr)
     setup_app_name_rules_settings(app_rules_gr)
 
@@ -2120,7 +2233,7 @@ def create_hard_link(file_path: Path | str, links_folder: Path | str) -> bool:
     return True
 
 
-def trim_clip_to_last_seconds(file_path: Path | str, duration_seconds: float) -> Path:
+def trim_clip_to_last_seconds(file_path: Path | str, duration_seconds: float) -> tuple[Path, bool]:
     file_path = Path(file_path)
     duration_seconds = max(float(duration_seconds), 1.0)
     temp_path = ensure_unique_filename(file_path.with_name(f"{file_path.stem}.half_tmp{file_path.suffix}"))
@@ -2157,11 +2270,11 @@ def trim_clip_to_last_seconds(file_path: Path | str, duration_seconds: float) ->
         )
     except FileNotFoundError:
         _print("Cannot trim clip: ffmpeg executable not found. Keeping full clip.")
-        return file_path
+        return file_path, False
     except Exception:
         _print("Cannot trim clip with ffmpeg. Keeping full clip.")
         _print(traceback.format_exc())
-        return file_path
+        return file_path, False
 
     if result.returncode != 0 or not temp_path.exists() or temp_path.stat().st_size == 0:
         _print("ffmpeg could not produce a trimmed clip. Keeping full clip.")
@@ -2169,7 +2282,7 @@ def trim_clip_to_last_seconds(file_path: Path | str, duration_seconds: float) ->
             _print(result.stderr.strip())
         with suppress(OSError):
             temp_path.unlink()
-        return file_path
+        return file_path, False
 
     try:
         os.replace(file_path, backup_path)
@@ -2181,7 +2294,7 @@ def trim_clip_to_last_seconds(file_path: Path | str, duration_seconds: float) ->
         with suppress(OSError):
             backup_path.unlink()
         _print(f"Trimmed clip saved at {file_path}")
-        return file_path
+        return file_path, True
     except Exception:
         _print("Cannot replace the original clip with the trimmed version. Keeping full clip.")
         _print(traceback.format_exc())
@@ -2190,15 +2303,18 @@ def trim_clip_to_last_seconds(file_path: Path | str, duration_seconds: float) ->
         with suppress(OSError):
             if backup_path.exists() and not file_path.exists():
                 os.replace(backup_path, file_path)
-        return file_path
+        return file_path, False
 
 
-def trim_half_clip_async(file_path: Path | str, duration_seconds: float, links_enabled: bool, links_folder: str):
+def trim_half_clip_async(file_path: Path | str, duration_seconds: float, links_enabled: bool, links_folder: str,
+                         short_metadata: dict | None = None, full_metadata: dict | None = None):
     try:
-        final_path = trim_clip_to_last_seconds(file_path, duration_seconds)
+        final_path, trimmed = trim_clip_to_last_seconds(file_path, duration_seconds)
         if links_enabled:
             create_hard_link(final_path, links_folder)
         VARIABLES.last_saved_clip_path = final_path
+        # A failed trim keeps the full clip, so its metadata must describe the full clip.
+        write_moment_metadata(final_path, short_metadata if trimmed else full_metadata)
     finally:
         VARIABLES.save_in_progress = False
 
@@ -2925,6 +3041,8 @@ def on_recording_started_callback(event):
     if event != obs.OBS_FRONTEND_EVENT_RECORDING_STARTED:
         return
 
+    VARIABLES.recording_started_at = time.time()
+
     # The recording is live and has captured its output path. Restore the OBS
     # recording path now so the NEXT (normal) recording is not redirected.
     cancel_alt_recording_watchdog()
@@ -2944,14 +3062,24 @@ def on_recording_stopped_callback(event):
     cancel_alt_recording_watchdog()
     restore_recording_path()
 
+    clip_end = time.time()
+    origin = "alt_recording" if VARIABLES.alt_recording_pending else "recording"
+    started_at, VARIABLES.recording_started_at = VARIABLES.recording_started_at, None
+    last_recording = None
+    with suppress(Exception):
+        getter = getattr(obs, "obs_frontend_get_last_recording", None)
+        last_recording = getter() if getter else None
+
     if VARIABLES.alt_recording_pending:
         VARIABLES.alt_recording_pending = False
-        with suppress(Exception):
-            getter = getattr(obs, "obs_frontend_get_last_recording", None)
-            last_recording = getter() if getter else None
-            if last_recording:
-                VARIABLES.last_saved_clip_path = Path(last_recording)
-                _print(f"Alternative recording saved at {last_recording}")
+        if last_recording:
+            VARIABLES.last_saved_clip_path = Path(last_recording)
+            _print(f"Alternative recording saved at {last_recording}")
+
+    # Only for a recording we saw start; otherwise last_recording may be an older file.
+    if last_recording and started_at is not None:
+        write_moment_metadata(last_recording, collect_moment_metadata(
+            origin, clip_end, clip_end - started_at, "obs_frontend_get_recording_output"))
 
     play_recording_sound_notification(
         PN.PROP_NOTIFY_RECORDING_ON_STOP,
@@ -2966,7 +3094,8 @@ def on_buffer_recording_started_callback(event):
     if event != obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
         return
 
-    # Reset and restart exe history
+    # Reset exe history; foreground_tick() fills it every second while it exists.
+    VARIABLES.buffer_started_at = time.time()
     VARIABLES.clip_exe_history = deque([], maxlen=get_replay_buffer_max_time())
     VARIABLES.clip_exe_counts = {}
     VARIABLES.cached_active_window_pid = None
@@ -2976,7 +3105,6 @@ def on_buffer_recording_started_callback(event):
     VARIABLES.save_in_progress = False
     cancel_pending_open_request()
     _print(f"Exe history deque created. Maxlen={VARIABLES.clip_exe_history.maxlen}.")
-    obs.timer_add(append_clip_exe_history, 1000)
 
 
 def on_buffer_recording_stopped_callback(event):
@@ -2986,9 +3114,8 @@ def on_buffer_recording_stopped_callback(event):
     if event != obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED:
         return
 
-    obs.timer_remove(append_clip_exe_history)
-    if VARIABLES.clip_exe_history is not None:
-        VARIABLES.clip_exe_history.clear()
+    VARIABLES.buffer_started_at = None
+    VARIABLES.clip_exe_history = None  # stops foreground_tick() from filling it
     VARIABLES.clip_exe_counts = {}
     VARIABLES.cached_active_window_pid = None
     VARIABLES.cached_active_exe = None
@@ -3005,6 +3132,7 @@ def on_buffer_save_callback(event):
 
     _print(f"{'SAVING BUFFER':->50}")
     VARIABLES.save_in_progress = True
+    clip_end = time.time()
 
     force_override = VARIABLES.force_override_save
     half_buffer_save = VARIABLES.half_buffer_save
@@ -3023,6 +3151,9 @@ def on_buffer_save_callback(event):
         return
 
     VARIABLES.last_saved_clip_path = path
+    replay_output = "obs_frontend_get_replay_buffer_output"
+    full_duration = get_replay_clip_duration(clip_end)
+    full_metadata = collect_moment_metadata("replay_buffer", clip_end, full_duration, replay_output)
 
     trimming_started = False
     if half_buffer_save:
@@ -3031,10 +3162,12 @@ def on_buffer_save_callback(event):
         half_duration = get_replay_buffer_max_time() * short_percent / 100
         links_enabled = obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_CLIPS_CREATE_LINKS)
         links_folder = obs.obs_data_get_string(VARIABLES.script_settings, PN.PROP_CLIPS_LINKS_FOLDER_PATH)
+        short_metadata = collect_moment_metadata(
+            "short_clip", clip_end, min(half_duration, full_duration), replay_output)
         try:
             Thread(
                 target=trim_half_clip_async,
-                args=(path, half_duration, links_enabled, links_folder),
+                args=(path, half_duration, links_enabled, links_folder, short_metadata, full_metadata),
                 daemon=True
             ).start()
             trimming_started = True
@@ -3043,6 +3176,8 @@ def on_buffer_save_callback(event):
             _print(traceback.format_exc())
 
     notify(True, path)
+    if not trimming_started:
+        write_moment_metadata(path, full_metadata)
     reset_forced_save_state()
     if not trimming_started:
         VARIABLES.save_in_progress = False
@@ -3069,6 +3204,590 @@ def append_clip_exe_history():
 
         VARIABLES.clip_exe_history.appendleft(exe)
         VARIABLES.clip_exe_counts[exe] = VARIABLES.clip_exe_counts.get(exe, 0) + 1
+
+
+def foreground_tick():
+    """
+    1 s sampler (OBS video thread): replay-buffer exe history, the moment timeline
+    and the auto scene switcher.
+    """
+    append_clip_exe_history()
+
+    executable_path = None
+    with suppress(Exception):
+        executable_path = get_active_executable_path()
+    scene = ""
+    with suppress(Exception):
+        scene = get_current_scene_name() or ""
+    record_timeline_sample(time.time(), app_display_name(executable_path), exe_basename(executable_path), scene)
+
+    try:
+        auto_scene_tick(executable_path, scene)
+    except Exception:
+        with suppress(Exception):
+            auto_scene_detach()
+        if VARIABLES.auto_scene_status != "error":
+            VARIABLES.auto_scene_status = "error"
+            _print("Auto scene: error; it will retry every second.")
+            _print(traceback.format_exc())
+
+
+# -------------------- moment_metadata.py --------------------
+RATE_CONTROL_QUALITY_KEYS = {"CQP": "cqp", "CRF": "crf", "ICQ": "icq_quality"}
+RECORDING_PRESET_KEYS = ("encoder", "rate_control", "cq", "width", "height", "fps")
+
+
+def exe_basename(executable_path) -> str:
+    """Executable file name only: metadata never carries absolute paths."""
+    return Path(executable_path).name.lower() if executable_path else ""
+
+
+def app_display_name(executable_path) -> str:
+    """Quiet clip-name resolution (path alias > .exe fix > exe stem) for per-second sampling."""
+    if not executable_path:
+        return CONSTANTS.DEFAULT_FALLBACK_CLIP_NAME
+    alias = get_alias(executable_path, VARIABLES.aliases)
+    if alias:
+        return alias
+    stem = Path(executable_path).stem
+    return VARIABLES.name_replacements.get(normalize_rule_name(stem), stem)
+
+
+def record_timeline_sample(ts: float, app: str, exe: str, scene: str) -> None:
+    """Keeps only change points, so one log serves both short buffers and hour-long recordings."""
+    log = VARIABLES.timeline_log
+    if log and log[-1][1:] == (app, exe, scene):
+        return
+    log.append((ts, app, exe, scene))
+
+
+def cut_timeline(log, clip_start: float, clip_end: float) -> list[tuple[float, str, str, str]]:
+    """
+    Change points inside the clip as (t, app, exe, scene) with t relative to the clip start.
+    The last change before the clip start becomes the t=0 entry.
+    """
+    out = []
+    for ts, app, exe, scene in log:
+        if ts > clip_end:
+            break
+        if ts <= clip_start:
+            out = [(0.0, app, exe, scene)]
+        else:
+            out.append((round(ts - clip_start, 2), app, exe, scene))
+    return out
+
+
+def markers_to_annotations(markers, clip_start: float, clip_end: float) -> list[dict]:
+    """Mark-moment wall times inside the clip; older (or later) markers are dropped."""
+    return [
+        {"type": "marker", "t": round(marker - clip_start, 2), "label": "mark"}
+        for marker in sorted(markers)
+        if clip_start <= marker <= clip_end
+    ]
+
+
+def summarize_game(timeline, duration: float, game_scene: str) -> dict:
+    """The app on screen for most of the clip, and whether it was shown via the Game scene."""
+    app_time: dict[tuple[str, str], float] = {}
+    scene_time: dict[tuple[str, str], dict[str, float]] = {}
+    for index, (t, app, exe, scene) in enumerate(timeline):
+        end = timeline[index + 1][0] if index + 1 < len(timeline) else duration
+        span = max(end - t, 0.0)
+        app_time[(app, exe)] = app_time.get((app, exe), 0.0) + span
+        scenes = scene_time.setdefault((app, exe), {})
+        scenes[scene] = scenes.get(scene, 0.0) + span
+
+    if not app_time:
+        return {"name": CONSTANTS.DEFAULT_FALLBACK_CLIP_NAME, "exe": "", "captured_via": "display_capture"}
+
+    name, exe = max(app_time.items(), key=lambda item: item[1])[0]
+    top_scene = max(scene_time[(name, exe)].items(), key=lambda item: item[1])[0]
+    return {
+        "name": name,
+        "exe": exe,
+        "captured_via": "game_capture" if game_scene and top_scene == game_scene else "display_capture",
+    }
+
+
+def build_moment_metadata(*, origin: str, clip_end: float, duration: float, timeline_log, markers,
+                          game_scene: str, audio_tracks: list[dict], recording_preset: dict,
+                          obs_version: str) -> dict:
+    """Pure `moment.clip/1` payload builder (shared contract with Moment Player)."""
+    duration = max(float(duration), 0.0)
+    clip_start = clip_end - duration
+    timeline = cut_timeline(timeline_log, clip_start, clip_end)
+    return {
+        "schema": CONSTANTS.MOMENT_SCHEMA,
+        "origin": origin,
+        "saved_at": datetime.fromtimestamp(clip_end).astimezone().isoformat(timespec="seconds"),
+        "duration_s": round(duration, 2),
+        "game": summarize_game(timeline, duration, game_scene),
+        "timeline": [{"t": t, "app": app, "scene": scene} for t, app, _, scene in timeline],
+        "annotations": markers_to_annotations(markers, clip_start, clip_end),
+        "audio_tracks": audio_tracks,
+        "recording_preset": recording_preset,
+        "obs_version": obs_version,
+        "writer": f"Moment Replays {CONSTANTS.VERSION}",
+    }
+
+
+def get_audio_tracks() -> list[dict]:
+    """Recorded audio tracks (RecTracks bitmask) named from the profile's AdvOut/Track{n}Name."""
+    if get_obs_config("Output", "Mode") == "Simple":
+        mask = get_obs_config("SimpleOutput", "RecTracks", int)
+    else:
+        mask = get_obs_config("AdvOut", "RecTracks", int)
+    mask = mask or 1
+    return [
+        {"track": n, "name": get_obs_config("AdvOut", f"Track{n}Name") or f"Track {n}"}
+        for n in range(1, 7)
+        if mask & (1 << (n - 1))
+    ]
+
+
+def get_recording_preset(output_getter_name: str) -> dict:
+    """Encoder id, rate control, quality, scaled size and fps of the output that wrote the clip."""
+    preset = dict.fromkeys(RECORDING_PRESET_KEYS)
+    with suppress(Exception):
+        video_info = obs.obs_video_info()
+        if obs.obs_get_video_info(video_info) and video_info.fps_den:
+            fps = video_info.fps_num / video_info.fps_den
+            preset["fps"] = int(fps) if float(fps).is_integer() else round(fps, 3)
+
+    getter = getattr(obs, output_getter_name, None)
+    output = getter() if getter is not None else None
+    if output is None:
+        return preset
+    try:
+        encoder = obs.obs_output_get_video_encoder(output)
+        if encoder is None:
+            return preset
+        preset["encoder"] = obs.obs_encoder_get_id(encoder) or None
+        preset["width"] = obs.obs_encoder_get_width(encoder) or None
+        preset["height"] = obs.obs_encoder_get_height(encoder) or None
+        settings = obs.obs_encoder_get_settings(encoder)
+        if settings is not None:
+            try:
+                rate_control = obs.obs_data_get_string(settings, "rate_control") or ""
+                preset["rate_control"] = rate_control or None
+                quality_key = RATE_CONTROL_QUALITY_KEYS.get(rate_control.upper())
+                if quality_key:
+                    preset["cq"] = obs.obs_data_get_int(settings, quality_key)
+            finally:
+                obs.obs_data_release(settings)
+    finally:
+        obs.obs_output_release(output)
+    return preset
+
+
+def get_replay_clip_duration(clip_end: float) -> float:
+    """Replay length: the buffer size, or less if the buffer started recently."""
+    max_time = 0
+    with suppress(Exception):
+        max_time = int(get_replay_buffer_max_time() or 0)
+    started = VARIABLES.buffer_started_at
+    if started is None:
+        return float(max_time)
+    elapsed = max(clip_end - started, 0.0)
+    return min(float(max_time), elapsed) if max_time else elapsed
+
+
+def collect_moment_metadata(origin: str, clip_end: float, duration: float, output_getter_name: str) -> dict | None:
+    """Builds the .moment.json payload (UI thread). Never raises: metadata must not break a save."""
+    if not obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_WRITE_MOMENT_METADATA):
+        return None
+    try:
+        audio_tracks = []
+        with suppress(Exception):
+            audio_tracks = get_audio_tracks()
+        preset = dict.fromkeys(RECORDING_PRESET_KEYS)
+        with suppress(Exception):
+            preset = get_recording_preset(output_getter_name)
+        return build_moment_metadata(
+            origin=origin,
+            clip_end=clip_end,
+            duration=duration,
+            timeline_log=list(VARIABLES.timeline_log),  # snapshot: the sampler appends on another thread
+            markers=list(VARIABLES.moment_markers),
+            game_scene=obs.obs_data_get_string(VARIABLES.script_settings, PN.PROP_AUTO_SCENE_GAME),
+            audio_tracks=audio_tracks,
+            recording_preset=preset,
+            obs_version=CONSTANTS.OBS_VERSION_STRING,
+        )
+    except Exception:
+        _print("Cannot collect moment metadata; the clip itself is saved.")
+        _print(traceback.format_exc())
+        return None
+
+
+def moment_metadata_path(clip_path: Path | str) -> Path:
+    clip_path = Path(clip_path)
+    return clip_path.with_name(clip_path.stem + CONSTANTS.MOMENT_METADATA_SUFFIX)
+
+
+def write_moment_metadata(clip_path: Path | str | None, payload: dict | None) -> None:
+    """Writes <clip basename>.moment.json next to the final clip, atomically. Never raises."""
+    if payload is None or not clip_path:
+        return
+    try:
+        path = moment_metadata_path(clip_path)
+        write_json_atomic(path, payload)
+        _print(f"Moment metadata saved at {path}")
+    except Exception:
+        _print("Cannot write moment metadata; the clip itself is saved.")
+        _print(traceback.format_exc())
+
+
+def mark_moment():
+    """Stores a wall-clock marker; a later save turns markers inside the clip into annotations."""
+    VARIABLES.moment_markers.append(time.time())
+    _print("Moment marked.")
+    play_mark_feedback()
+
+
+def play_mark_feedback():
+    """A short blip of the success sound, if sound notifications are on."""
+    settings = VARIABLES.script_settings
+    if not (obs.obs_data_get_bool(settings, PN.GR_SOUND_NOTIFICATION_SETTINGS) and
+            obs.obs_data_get_bool(settings, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS)):
+        return
+    play_sound(obs.obs_data_get_string(settings, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH))
+    obs.timer_remove(stop_mark_feedback)  # at most one pending stop timer
+    obs.timer_add(stop_mark_feedback, CONSTANTS.MARK_FEEDBACK_MS)
+
+
+def stop_mark_feedback():
+    obs.timer_remove(stop_mark_feedback)
+    with suppress(Exception):
+        winsound.PlaySound(None, 0)
+
+
+# -------------------- auto_scene.py --------------------
+SHELL_WINDOW_CLASSES = frozenset(("progman", "workerw", "shell_traywnd"))
+WS_MAXIMIZE = 0x01000000
+WS_BORDER = 0x00800000
+HOOKED_EXE_UNKNOWN = "*"
+
+
+def is_fullscreen_game_window(window_rect, monitor_rect, window_class: str, style: int,
+                              exe_name: str, app_name: str, other_names) -> bool:
+    """
+    True when the foreground window looks like a game: it covers its whole monitor
+    (exclusive or borderless fullscreen), is not the desktop/taskbar, is not a regular
+    maximized window (same rule as OBS game capture), and its app is not in the Other list.
+    """
+    if (window_class or "").casefold() in SHELL_WINDOW_CLASSES:
+        return False
+    if (style & WS_MAXIMIZE) and (style & WS_BORDER):
+        return False
+    if (normalize_rule_name(Path(exe_name).stem) in other_names or
+            normalize_rule_name(app_name) in other_names):
+        return False
+    left, top, right, bottom = window_rect
+    m_left, m_top, m_right, m_bottom = monitor_rect
+    return left <= m_left and top <= m_top and right >= m_right and bottom >= m_bottom
+
+
+class AutoSceneMachine:
+    """
+    Game/Desktop decision with a debounce on the way back to Desktop.
+
+    - Desktop -> Game: the foreground is a fullscreen game AND the game capture source has
+      hooked that exe (so the Game scene never shows black frames).
+    - Game -> Desktop: immediately on `unhooked`; otherwise once the foreground has not been
+      the hooked fullscreen game for longer than `debounce_s`.
+    - Any other current scene (e.g. a manual "BRB" scene) is left alone.
+    """
+
+    def __init__(self, debounce_s: float = CONSTANTS.AUTO_SCENE_DEBOUNCE_S):
+        self.debounce_s = debounce_s
+        self.hooked_exe: str | None = None  # set by the game capture `hooked`/`unhooked` signals
+        self.lost_since: float | None = None
+
+    def decide(self, now: float, current_scene: str, fg_exe: str, fg_is_game: bool,
+               game_scene: str, desktop_scene: str) -> str | None:
+        if current_scene not in (game_scene, desktop_scene):
+            self.lost_since = None
+            return None
+
+        hooked = self.hooked_exe
+        in_game = bool(fg_is_game and hooked and hooked in (HOOKED_EXE_UNKNOWN, fg_exe))
+
+        if current_scene == desktop_scene:
+            self.lost_since = None
+            return game_scene if in_game else None
+
+        if hooked is None:
+            self.lost_since = None
+            return desktop_scene
+        if in_game:
+            self.lost_since = None
+            return None
+        if self.lost_since is None:
+            self.lost_since = now
+            return None
+        if now - self.lost_since > self.debounce_s:
+            self.lost_since = None
+            return desktop_scene
+        return None
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+if IS_WINDOWS:
+    # Own WinDLL instance: typed prototypes here must not leak into other scripts' ctypes.windll.user32.
+    _win_user32 = ctypes.WinDLL("user32")
+    _win_user32.GetForegroundWindow.restype = wintypes.HWND
+    _win_user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+    _win_user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+    _win_user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    _win_user32.GetMonitorInfoW.argtypes = (wintypes.HMONITOR, ctypes.POINTER(MONITORINFO))
+    _win_user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    _win_user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+    _win_user32.GetWindowLongW.restype = wintypes.LONG
+else:
+    _win_user32 = None
+
+_OBS_NATIVE = None  # (libobs, frontend) ctypes handles, loaded on first scene switch
+
+
+def get_foreground_window_geometry():
+    """(window_rect, monitor_rect, class_name, style) of the foreground window, or None."""
+    hwnd = _win_user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    rect = wintypes.RECT()
+    if not _win_user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    monitor = _win_user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    if not monitor or not _win_user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return None
+    class_name = ctypes.create_unicode_buffer(256)
+    _win_user32.GetClassNameW(hwnd, class_name, 256)
+    style = _win_user32.GetWindowLongW(hwnd, -16) & 0xFFFFFFFF  # GWL_STYLE
+    m = info.rcMonitor
+    return (rect.left, rect.top, rect.right, rect.bottom), (m.left, m.top, m.right, m.bottom), class_name.value, style
+
+
+def classify_foreground(executable_path) -> tuple[str, bool]:
+    """(exe file name, is fullscreen game) for the current foreground window."""
+    exe = exe_basename(executable_path)
+    if not executable_path or VARIABLES.cached_active_window_pid == os.getpid():
+        return exe, False
+    geometry = get_foreground_window_geometry()
+    if geometry is None:
+        return exe, False
+    window_rect, monitor_rect, class_name, style = geometry
+    return exe, is_fullscreen_game_window(window_rect, monitor_rect, class_name, style, exe,
+                                          app_display_name(executable_path), VARIABLES.other_names)
+
+
+def set_auto_scene_status(status: str) -> None:
+    if status != VARIABLES.auto_scene_status:
+        VARIABLES.auto_scene_status = status
+        _print(f"Auto scene: {status}")
+
+
+def get_live_source(name: str):
+    """Strong reference to a not-removed source by name, or None. Caller releases."""
+    if not name:
+        return None
+    source = obs.obs_get_source_by_name(name)
+    if source is not None and obs.obs_source_removed(source):
+        obs.obs_source_release(source)
+        return None
+    return source
+
+
+def scene_exists(name: str) -> bool:
+    source = get_live_source(name)
+    if source is None:
+        return False
+    try:
+        return obs.obs_scene_from_source(source) is not None
+    finally:
+        obs.obs_source_release(source)
+
+
+def on_game_capture_hooked(calldata):
+    machine = VARIABLES.auto_scene_machine
+    if machine is not None:
+        machine.hooked_exe = exe_basename(obs.calldata_string(calldata, "executable")) or HOOKED_EXE_UNKNOWN
+
+
+def on_game_capture_unhooked(calldata):
+    machine = VARIABLES.auto_scene_machine
+    if machine is not None:
+        machine.hooked_exe = None
+
+
+def auto_scene_attach(source_name: str) -> bool:
+    source = get_live_source(source_name)
+    if source is None:
+        return False
+    if obs.obs_source_get_unversioned_id(source) != "game_capture":
+        obs.obs_source_release(source)
+        return False
+
+    machine = AutoSceneMachine()
+    # Already capturing (e.g. scripts reloaded mid-game): `hooked` will not fire again.
+    if obs.obs_source_get_width(source) > 0:
+        machine.hooked_exe = HOOKED_EXE_UNKNOWN
+    VARIABLES.auto_scene_machine = machine
+
+    handler = obs.obs_source_get_signal_handler(source)
+    obs.signal_handler_connect(handler, "hooked", on_game_capture_hooked)
+    obs.signal_handler_connect(handler, "unhooked", on_game_capture_unhooked)
+    # Keep the capture hooking while Desktop is on air; balanced in auto_scene_detach().
+    obs.obs_source_inc_showing(source)
+    VARIABLES.auto_scene_source = source
+    return True
+
+
+def auto_scene_detach() -> None:
+    source = VARIABLES.auto_scene_source
+    if source is None:
+        return
+    VARIABLES.auto_scene_source = None
+    VARIABLES.auto_scene_machine = None
+    with suppress(Exception):
+        handler = obs.obs_source_get_signal_handler(source)
+        obs.signal_handler_disconnect(handler, "hooked", on_game_capture_hooked)
+        obs.signal_handler_disconnect(handler, "unhooked", on_game_capture_unhooked)
+    with suppress(Exception):
+        obs.obs_source_dec_showing(source)
+    obs.obs_source_release(source)
+
+
+def load_obs_native():
+    """ctypes views of the already-loaded obs.dll and obs-frontend-api.dll."""
+    get_module = ctypes.WinDLL("kernel32").GetModuleHandleW
+    get_module.argtypes = (wintypes.LPCWSTR,)
+    get_module.restype = wintypes.HMODULE
+    libobs_handle = get_module("obs.dll")
+    frontend_handle = get_module("obs-frontend-api.dll")
+    if not libobs_handle or not frontend_handle:
+        raise OSError("obs.dll / obs-frontend-api.dll are not loaded in this process.")
+
+    libobs = ctypes.CDLL("obs.dll", handle=libobs_handle)
+    frontend = ctypes.CDLL("obs-frontend-api.dll", handle=frontend_handle)
+    libobs.obs_get_source_by_name.argtypes = (ctypes.c_char_p,)
+    libobs.obs_get_source_by_name.restype = ctypes.c_void_p
+    libobs.obs_source_release.argtypes = (ctypes.c_void_p,)
+    libobs.obs_source_release.restype = None
+    frontend.obs_frontend_set_current_scene.argtypes = (ctypes.c_void_p,)
+    frontend.obs_frontend_set_current_scene.restype = None
+    return libobs, frontend
+
+
+def set_current_scene_by_name(name: str) -> bool:
+    """
+    Switches the program scene through ctypes, which releases the GIL. The obspython wrapper
+    keeps the GIL while obs_frontend_set_current_scene blocks on the UI thread, and the UI
+    thread needs the GIL for Python frontend-event callbacks: a deadlock.
+    """
+    global _OBS_NATIVE
+    if _OBS_NATIVE is None:
+        _OBS_NATIVE = load_obs_native()
+    libobs, frontend = _OBS_NATIVE
+    source = libobs.obs_get_source_by_name(name.encode("utf-8"))
+    if not source:
+        return False
+    try:
+        frontend.obs_frontend_set_current_scene(source)
+    finally:
+        libobs.obs_source_release(source)
+    return True
+
+
+def request_scene_switch(name: str) -> None:
+    """Switches on a worker thread so the OBS video thread never waits for the UI thread."""
+    if VARIABLES.auto_scene_switch_in_flight:
+        return
+    VARIABLES.auto_scene_switch_in_flight = True
+
+    def worker():
+        try:
+            if set_current_scene_by_name(name):
+                _print(f"Auto scene: switched to '{name}'.")
+            else:
+                _print(f"Auto scene: scene '{name}' not found.")
+        except Exception:
+            _print(f"Auto scene: cannot switch to '{name}'.")
+            _print(traceback.format_exc())
+        finally:
+            VARIABLES.auto_scene_switch_in_flight = False
+
+    try:
+        Thread(target=worker, daemon=True).start()
+    except Exception:
+        VARIABLES.auto_scene_switch_in_flight = False
+        _print(traceback.format_exc())
+
+
+def auto_scene_tick(executable_path, current_scene: str) -> None:
+    """
+    Runs every second. Auto scene is active only when the setting is on AND both scenes and
+    the game capture source exist; otherwise the source is released and nothing is switched.
+    """
+    settings = VARIABLES.script_settings
+    if (settings is None or VARIABLES.auto_scene_blocked or
+            not obs.obs_data_get_bool(settings, PN.PROP_AUTO_SCENE_ENABLED)):
+        auto_scene_detach()
+        set_auto_scene_status("off")
+        return
+
+    game_scene = obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_GAME)
+    desktop_scene = obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_DESKTOP)
+    source_name = obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_GAME_SOURCE)
+    if game_scene == desktop_scene or not (scene_exists(game_scene) and scene_exists(desktop_scene)):
+        auto_scene_detach()
+        set_auto_scene_status(f"waiting for scenes '{game_scene}' and '{desktop_scene}'")
+        return
+
+    source = VARIABLES.auto_scene_source
+    if source is not None and (obs.obs_source_removed(source) or obs.obs_source_get_name(source) != source_name):
+        auto_scene_detach()
+    if VARIABLES.auto_scene_source is None and not auto_scene_attach(source_name):
+        set_auto_scene_status(f"waiting for game capture source '{source_name}'")
+        return
+    set_auto_scene_status(f"on ('{game_scene}' / '{desktop_scene}', source '{source_name}')")
+
+    if VARIABLES.auto_scene_switch_in_flight:
+        return
+    fg_exe, fg_is_game = classify_foreground(executable_path)
+    target = VARIABLES.auto_scene_machine.decide(
+        time.monotonic(), current_scene, fg_exe, fg_is_game, game_scene, desktop_scene
+    )
+    if target:
+        request_scene_switch(target)
+
+
+def on_scene_collection_event_callback(event):
+    """Releases the Game Capture reference before OBS tears sources down."""
+    release_events = {getattr(obs, name, None) for name in (
+        "OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING",
+        "OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP",
+        "OBS_FRONTEND_EVENT_EXIT",
+    )} - {None}
+    resume_events = {getattr(obs, name, None) for name in (
+        "OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED",
+        "OBS_FRONTEND_EVENT_FINISHED_LOADING",
+    )} - {None}
+    if event in release_events:
+        VARIABLES.auto_scene_blocked = True
+        auto_scene_detach()
+    elif event in resume_events:
+        VARIABLES.auto_scene_blocked = False
 
 
 # -------------------- hotkeys.py --------------------
@@ -3102,19 +3821,19 @@ def load_hotkeys():
          lambda pressed: open_last_saved_video() if pressed else None),
 
         (PN.HK_RECORD_ALT, "[Moment Replays] Start/stop recording (alternative folder)",
-         lambda pressed: toggle_alt_recording_save() if pressed else None)
+         lambda pressed: toggle_alt_recording_save() if pressed else None),
+
+        (PN.HK_MARK_MOMENT, "[Moment Replays] Mark moment",
+         lambda pressed: mark_moment() if pressed else None)
     )
 
     for key_name, key_desc, key_callback in keys:
         key_id = obs.obs_hotkey_register_frontend(key_name, key_desc, key_callback)
         VARIABLES.hotkey_ids.update({key_name: key_id})
         key_data = obs.obs_data_get_array(VARIABLES.script_settings, key_name)
-        if key_name == PN.HK_SAVE_BUFFER_HALF and not obs.obs_data_has_user_value(VARIABLES.script_settings, key_name):
-            default_data = build_default_hotkey_data("OBS_KEY_F10", control=True)
-            obs.obs_hotkey_load(key_id, default_data)
-            obs.obs_data_array_release(default_data)
-        elif key_name == PN.HK_SAVE_BUFFER_OVERRIDE and not obs.obs_data_has_user_value(VARIABLES.script_settings, key_name):
-            default_data = build_default_hotkey_data("OBS_KEY_F10", alt=True)
+        default = HOTKEY_DEFAULTS.get(key_name)
+        if default and not obs.obs_data_has_user_value(VARIABLES.script_settings, key_name):
+            default_data = build_default_hotkey_data(default[0], **default[1])
             obs.obs_hotkey_load(key_id, default_data)
             obs.obs_data_array_release(default_data)
         else:
@@ -3169,7 +3888,8 @@ def unregister_frontend_event_callbacks() -> None:
         on_recording_stopped_callback,
         on_buffer_save_callback,
         on_buffer_recording_started_callback,
-        on_buffer_recording_stopped_callback
+        on_buffer_recording_stopped_callback,
+        on_scene_collection_event_callback
     ):
         with suppress(Exception):
             remove_event_callback(callback)
@@ -3182,6 +3902,7 @@ def register_frontend_event_callbacks() -> None:
     obs.obs_frontend_add_event_callback(on_buffer_save_callback)
     obs.obs_frontend_add_event_callback(on_buffer_recording_started_callback)
     obs.obs_frontend_add_event_callback(on_buffer_recording_stopped_callback)
+    obs.obs_frontend_add_event_callback(on_scene_collection_event_callback)
 
 
 def get_existing_persisted_settings_path() -> Path:
@@ -3321,6 +4042,10 @@ def load_persisted_settings() -> dict[str, Any]:
         raw_value = payload.get(prop_name)
         if isinstance(raw_value, bool):
             persisted_settings[prop_name] = raw_value
+
+    # Schema 6 migration: auto scene is opt-in. A sidecar without the key (any pre-1.6 setup,
+    # e.g. one driven by Advanced Scene Switcher) stays off; only the installer writes `true`.
+    persisted_settings.setdefault(PN.PROP_AUTO_SCENE_ENABLED, False)
 
     for prop_name in PERSISTED_INT_DEFAULTS.keys():
         raw_value = payload.get(prop_name)
@@ -3513,6 +4238,8 @@ def script_update(settings):
         _print("Saved aliases or app rules are invalid. Falling back to defaults.")
         load_aliases({})
         load_app_name_rules({})
+    if not obs.obs_data_get_bool(settings, PN.PROP_AUTO_SCENE_ENABLED):
+        auto_scene_detach()  # balance inc_showing right away; foreground_tick re-attaches when re-enabled
     VARIABLES.sidecar_persist_enabled = True
     _print("Script updated")
 
@@ -3543,6 +4270,8 @@ def script_load(script_settings):
     VARIABLES.last_links_folder = None
     VARIABLES.alt_recording_pending = False
     VARIABLES.saved_recording_path = None
+    VARIABLES.auto_scene_blocked = False
+    VARIABLES.auto_scene_status = ""
     json_settings = json.loads(obs.obs_data_get_json(script_settings))
     try:
         load_aliases(json_settings)
@@ -3557,6 +4286,10 @@ def script_load(script_settings):
 
     if obs.obs_frontend_replay_buffer_active():
         on_buffer_recording_started_callback(obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED)
+        VARIABLES.buffer_started_at = None  # started before this load: assume a full buffer
+    # A recording already running has an unknown start, so it gets no .moment.json.
+    VARIABLES.recording_started_at = None
+    obs.timer_add(foreground_tick, CONSTANTS.FOREGROUND_TICK_MS)
 
     VARIABLES.sidecar_persist_enabled = True
     start_update_check_thread()
@@ -3568,7 +4301,9 @@ def script_unload():
     unregister_frontend_event_callbacks()
     if VARIABLES.script_settings is not None:
         save_persisted_settings_from_obs_data(VARIABLES.script_settings, allow_when_disabled=True)
-    obs.timer_remove(append_clip_exe_history)
+    obs.timer_remove(foreground_tick)
+    obs.timer_remove(stop_mark_feedback)
+    auto_scene_detach()
     obs.timer_remove(update_status_refresh_timer_callback)
     VARIABLES.update_status_refresh_timer_active = False
     VARIABLES.update_status_props = None
