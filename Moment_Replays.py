@@ -28,6 +28,7 @@ import winsound
 from enum import Enum
 from threading import Lock
 from threading import Thread
+from threading import current_thread
 from pathlib import Path
 from collections import deque
 from datetime import datetime
@@ -42,6 +43,7 @@ if __name__ != '__main__':
 # -------------------- globals.py --------------------
 IS_WINDOWS = sys.platform == "win32"
 user32 = ctypes.windll.user32 if IS_WINDOWS else None
+WORKER_THREAD_NAME = "MomentReplays-worker"  # every Thread this script starts; see _print
 
 
 class CONSTANTS:
@@ -149,6 +151,7 @@ class VARIABLES:
     # Moment metadata: (wall_ts, app, exe, scene) change points, F8 marker wall times.
     timeline_log: deque = deque(maxlen=CONSTANTS.TIMELINE_LOG_MAXLEN)
     moment_markers: deque = deque(maxlen=CONSTANTS.MARKERS_MAXLEN)
+    deferred_logs: deque = deque(maxlen=1000)  # worker-thread log lines, printed by foreground_tick
     buffer_started_at: float | None = None
     recording_started_at: float | None = None
     # Auto scene (Game/Desktop)
@@ -737,7 +740,7 @@ def set_update_status_key(key: str, *, log: bool = True, lang: str | None = None
     VARIABLES.update_status_args = dict(kwargs)
     VARIABLES.update_status_text = ""
     if log:
-        _print(tr(key, lang=lang, **kwargs))
+        _print(re.sub(r"<br\s*/?>", " ", re.sub(r"<(?!br)[^>]+>", "", tr(key, lang=lang, **kwargs))))  # UI HTML
 
 
 def fetch_latest_release_info() -> tuple[str, str]:
@@ -768,7 +771,9 @@ def check_for_updates(source: str = "manual", lang: str | None = None, *, lock_a
 
     VARIABLES.update_check_in_progress = True
     try:
-        set_update_status_key("update_status_checking", version=CONSTANTS.VERSION, lang=lang)
+        # start_update_check_thread() already logged "Checking..." before handing over the lock.
+        set_update_status_key("update_status_checking", version=CONSTANTS.VERSION, lang=lang,
+                              log=not lock_acquired)
         latest_version, release_url = fetch_latest_release_info()
         VARIABLES.latest_release_url = release_url
 
@@ -821,7 +826,8 @@ def start_update_check_thread(source: str = "automatic", props=None) -> bool:
         schedule_update_status_refresh(props)
 
     try:
-        Thread(target=check_for_updates, args=(source, lang), kwargs={"lock_acquired": True}, daemon=True).start()
+        Thread(target=check_for_updates, args=(source, lang), kwargs={"lock_acquired": True}, daemon=True,
+               name=WORKER_THREAD_NAME).start()
     except Exception:
         set_update_status_key("update_status_thread_failed", lang=lang)
         _print(traceback.format_exc())
@@ -2060,7 +2066,19 @@ def export_aliases_to_json_callback(*args):
 # -------------------- tech.py --------------------
 def _print(*values, sep: str | None = None, end: str | None = None, file=None, flush: bool = False):
     str_time = datetime.now().strftime(f"%d.%m.%Y %H:%M:%S")
+    if current_thread().name == WORKER_THREAD_NAME:
+        # OBS labels script output by obspython's "current script", which worker threads never
+        # have ("[Unknown Script]"): queue the line; foreground_tick prints it within a second.
+        VARIABLES.deferred_logs.append((sep or " ").join(map(str, (f"[{str_time}]",) + values)))
+        return
     print(f"[{str_time}]", *values, sep=sep, end=end, file=file, flush=flush)
+
+
+def flush_deferred_logs() -> None:
+    """Prints worker-thread log lines; call from a script callback so OBS labels them correctly."""
+    logs = VARIABLES.deferred_logs
+    while logs:
+        print(logs.popleft())
 
 
 def reset_forced_save_state():
@@ -3188,7 +3206,8 @@ def on_buffer_save_callback(event):
             Thread(
                 target=trim_half_clip_async,
                 args=(path, half_duration, links_enabled, links_folder, short_metadata, full_metadata),
-                daemon=True
+                daemon=True,
+                name=WORKER_THREAD_NAME
             ).start()
             trimming_started = True
         except Exception:
@@ -3233,6 +3252,7 @@ def foreground_tick():
     "current script" is still this one (see auto_scene_prepare): later steps call ctypes
     WinDLL functions, which release the GIL.
     """
+    flush_deferred_logs()
     scene = ""
     with suppress(Exception):
         scene = get_current_scene_name() or ""  # obspython only: keeps the GIL
@@ -3288,7 +3308,19 @@ def record_timeline_sample(ts: float, app: str, exe: str, scene: str) -> None:
     log = VARIABLES.timeline_log
     if log and log[-1][1:] == (app, exe, scene):
         return
+    if log and ts < log[-1][0]:
+        ts = log[-1][0]  # the UI thread (scene change) and the 1 s sampler can race: stay ordered
     log.append((ts, app, exe, scene))
+
+
+def record_scene_change() -> None:
+    """Timeline entry the moment the program scene changes, not up to 1 s later at the next sample."""
+    log = VARIABLES.timeline_log
+    if not log:
+        return
+    with suppress(Exception):
+        _, app, exe, _ = log[-1]
+        record_timeline_sample(time.time(), app, exe, get_current_scene_name() or "")
 
 
 def cut_timeline(log, clip_start: float, clip_end: float) -> list[tuple[float, str, str, str]]:
@@ -3989,7 +4021,7 @@ def request_other_obs_scan(now: float) -> None:
     VARIABLES.other_obs_checked_at = now
     VARIABLES.other_obs_scan_running = True
     try:
-        Thread(target=scan_other_obs, daemon=True).start()
+        Thread(target=scan_other_obs, daemon=True, name=WORKER_THREAD_NAME).start()
     except Exception:
         VARIABLES.other_obs_scan_running = False
 
@@ -4197,7 +4229,7 @@ def request_scene_switch(name: str) -> None:
             VARIABLES.auto_scene_switch_in_flight = False
 
     try:
-        Thread(target=worker, daemon=True).start()
+        Thread(target=worker, daemon=True, name=WORKER_THREAD_NAME).start()
     except Exception:
         VARIABLES.auto_scene_switch_in_flight = False
         _print(traceback.format_exc())
@@ -4313,7 +4345,13 @@ def auto_scene_switching(executable_path, current_scene: str, names: tuple[str, 
 
 
 def on_scene_collection_event_callback(event):
-    """Releases the Game Capture reference before OBS tears sources down."""
+    """
+    Releases the Game Capture reference before OBS tears sources down, and timestamps scene
+    changes in the moment timeline.
+    """
+    if event == getattr(obs, "OBS_FRONTEND_EVENT_SCENE_CHANGED", None):
+        record_scene_change()
+        return
     release_events = {getattr(obs, name, None) for name in (
         "OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING",
         "OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP",
@@ -4868,6 +4906,7 @@ def script_unload():
     VARIABLES.alt_recording_pending = False
     reset_forced_save_state()
 
+    flush_deferred_logs()
     _print("Script unloaded.")
 
 
