@@ -86,7 +86,8 @@ your normal record key). Change them freely in OBS hotkey settings.
   Apps listed in the `Other` folder list never count as games. If the game
   capture hooks but stays black for ~2 s, the script falls back to `Desktop`,
   re-hooks once and keeps that game off `Game` for 60 s, so clips never end up
-  black with sound.
+  black with sound. While another OBS is running, auto scene pauses (releases the
+  game capture and stays on `Desktop`) so it never takes that OBS's game hook.
 - **Sounds** — enable/disable and pick a `.wav` file for each event.
 - **Naming rules** — path-specific names, `.exe` name fixes, and the `Other` folder list.
 - **Updates** — manual update check and a button to open the latest release.

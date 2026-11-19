@@ -59,6 +59,8 @@ class CONSTANTS:
     BLACK_FALLBACK_S = 2.0         # black this long on the Game scene -> show Desktop
     BLACK_COOLDOWN_S = 60.0        # then keep that process off the Game scene this long
     BLACK_SAMPLE_SIZE = (32, 18)   # downscaled readback of the game capture
+    OTHER_OBS_CHECK_S = 2.5        # how often auto scene looks for another running OBS
+    OBS_PROCESS_NAME = "obs64.exe"
     MARK_FEEDBACK_MS = 200
     TIMELINE_LOG_MAXLEN = 10000
     MARKERS_MAXLEN = 1000
@@ -159,6 +161,11 @@ class VARIABLES:
     black_guard = None                # BlackFrameGuard, lives for the whole OBS session
     luma_sampler = None               # CaptureLumaSampler, created on first use
     luma_sampler_disabled = False
+    other_obs: str | None = None      # description of another running OBS, if any
+    other_obs_checked_at: float | None = None
+    other_obs_paused = False
+    other_obs_scan_running = False
+    other_obs_error_logged = False
     sidecar_persist_enabled = False
     update_check_in_progress = False
     update_status_props = None
@@ -468,7 +475,8 @@ UI_TEXT = {
         "auto_scene_enabled": "Auto-switch Game / Desktop scenes",
         "auto_scene_desc": (
             "Shows scene \"{game}\" once \"{source}\" has hooked a fullscreen game, otherwise \"{desktop}\". "
-            "Stays off unless both scenes and the game capture source exist."
+            "Stays off unless both scenes and the game capture source exist, and pauses while another OBS "
+            "is running so it never takes that OBS's game hook."
         ),
         "write_moment_metadata": "Save .moment.json next to clips",
         "write_moment_metadata_desc": (
@@ -598,7 +606,8 @@ UI_TEXT = {
         "auto_scene_enabled": "Автопереключение сцен Game / Desktop",
         "auto_scene_desc": (
             "Показывает сцену \"{game}\", когда \"{source}\" захватил полноэкранную игру, иначе \"{desktop}\". "
-            "Не работает, пока нет обеих сцен и источника захвата игры."
+            "Не работает, пока нет обеих сцен и источника захвата игры, и ставится на паузу, пока запущен "
+            "другой OBS, чтобы не забирать у него захват игры."
         ),
         "write_moment_metadata": "Сохранять .moment.json рядом с клипами",
         "write_moment_metadata_desc": (
@@ -3797,6 +3806,121 @@ if IS_WINDOWS:
 else:
     _win_user32 = None
 
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
+if IS_WINDOWS:
+    _win_kernel32 = ctypes.WinDLL("kernel32")
+    _win_kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    _win_kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    _win_kernel32.Process32FirstW.argtypes = (wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W))
+    _win_kernel32.Process32NextW.argtypes = (wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W))
+    _win_kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _win_kernel32.OpenProcess.restype = wintypes.HANDLE
+    _win_kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+    _win_kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+else:
+    _win_kernel32 = None
+
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+def list_processes() -> list[tuple[int, str]]:
+    """(pid, exe file name) of every running process. Read-only Toolhelp snapshot."""
+    snapshot = _win_kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == INVALID_HANDLE_VALUE:
+        raise OSError("CreateToolhelp32Snapshot failed.")
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        processes = []
+        ok = _win_kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            processes.append((entry.th32ProcessID, entry.szExeFile))
+            ok = _win_kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        return processes
+    finally:
+        _win_kernel32.CloseHandle(snapshot)
+
+
+def get_process_image_path(pid: int) -> str | None:
+    """Full image path of a process, or None when it can't be read (e.g. an elevated process)."""
+    handle = _win_kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if _win_kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return buffer.value
+        return None
+    finally:
+        _win_kernel32.CloseHandle(handle)
+
+
+def other_obs_pids(processes, own_pid: int) -> list[int]:
+    """PIDs of OBS processes other than this one (any path: a second copy of the same OBS counts too)."""
+    name = CONSTANTS.OBS_PROCESS_NAME.casefold()
+    return [pid for pid, exe in processes if pid != own_pid and exe.casefold() == name]
+
+
+def describe_other_obs(processes, own_pid: int, path_of) -> str | None:
+    """Human-readable list of other running OBS instances, or None. Unreadable paths still count."""
+    pids = other_obs_pids(processes, own_pid)
+    if not pids:
+        return None
+    return ", ".join(path_of(pid) or f"pid {pid}, path not readable" for pid in pids)
+
+
+def scan_other_obs() -> None:
+    """Refreshes VARIABLES.other_obs; a failed scan keeps the previous answer. Never raises."""
+    try:
+        VARIABLES.other_obs = describe_other_obs(list_processes(), os.getpid(), get_process_image_path)
+    except Exception:
+        if not VARIABLES.other_obs_error_logged:
+            VARIABLES.other_obs_error_logged = True
+            _print("Auto scene: cannot list processes to look for another OBS.")
+            _print(traceback.format_exc())
+    finally:
+        VARIABLES.other_obs_scan_running = False
+
+
+def poll_other_obs(now: float) -> str | None:
+    """
+    Another running OBS (description) or None, re-checked every OTHER_OBS_CHECK_S.
+    A scan costs several ms, so routine re-checks run on a worker thread (not the OBS graphics
+    thread); without a fresh answer (first use, or auto scene was off) it scans synchronously,
+    so the capture is never attached on a stale "no other OBS".
+    """
+    checked_at = VARIABLES.other_obs_checked_at
+    age = None if checked_at is None else now - checked_at
+    if age is None or age >= 2 * CONSTANTS.OTHER_OBS_CHECK_S:
+        VARIABLES.other_obs_checked_at = now
+        scan_other_obs()
+    elif age >= CONSTANTS.OTHER_OBS_CHECK_S and not VARIABLES.other_obs_scan_running:
+        VARIABLES.other_obs_checked_at = now
+        VARIABLES.other_obs_scan_running = True
+        try:
+            Thread(target=scan_other_obs, daemon=True).start()
+        except Exception:
+            VARIABLES.other_obs_scan_running = False
+    return VARIABLES.other_obs
+
+
 _OBS_NATIVE = None  # (libobs, frontend) ctypes handles, loaded on first scene switch
 
 
@@ -4003,6 +4127,21 @@ def auto_scene_tick(executable_path, current_scene: str) -> None:
         auto_scene_detach()
         set_auto_scene_status(f"waiting for scenes '{game_scene}' and '{desktop_scene}'")
         return
+
+    # Only one OBS can hold a game's hook: while another OBS runs, release the capture
+    # (game capture unhooks once nothing shows it) and stay off the Game scene.
+    other_obs = poll_other_obs(time.monotonic())
+    if other_obs:
+        auto_scene_detach()
+        VARIABLES.other_obs_paused = True
+        set_auto_scene_status(
+            f"another OBS is running ({other_obs}); game capture paused so its game hook is left alone")
+        if current_scene == game_scene and not VARIABLES.auto_scene_switch_in_flight:
+            request_scene_switch(desktop_scene)
+        return
+    if VARIABLES.other_obs_paused:
+        VARIABLES.other_obs_paused = False
+        _print("Auto scene: no other OBS is running any more; resuming game capture.")
 
     source = VARIABLES.auto_scene_source
     if source is not None and (obs.obs_source_removed(source) or obs.obs_source_get_name(source) != source_name):

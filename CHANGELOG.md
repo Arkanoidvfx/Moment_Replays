@@ -18,6 +18,10 @@ All notable changes to Moment Replays are documented here.
     game), one automatic re-hook, and a 60 s per-game cooldown so scenes can't
     flap. `Game` is only entered once the capture shows a non-black frame, so a
     black loading screen just delays it.
+  - **Another OBS running:** only one OBS can hold a game's hook. While any
+    other `obs64.exe` runs (checked every ~2.5 s, read-only), auto scene
+    releases the game capture so it unhooks, leaves `Game` for `Desktop` and
+    never enters `Game`; it resumes on its own once that OBS exits.
 - **`.moment.json` metadata** next to every saved clip and recording (replay
   buffer, short clip, alternative folder, recordings, alternative recordings):
   the game, an app/scene timeline, markers, recorded audio tracks and the
