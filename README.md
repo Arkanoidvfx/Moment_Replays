@@ -83,7 +83,10 @@ your normal record key). Change them freely in OBS hotkey settings.
   `Desktop` and a game capture source `Game Capture` in *any fullscreen* mode;
   other names can be set in `Moment_Replays.settings.json` via `auto_scene_game`,
   `auto_scene_desktop`, `auto_scene_game_source`) and *Save .moment.json next to clips*.
-  Apps listed in the `Other` folder list never count as games.
+  Apps listed in the `Other` folder list never count as games. If the game
+  capture hooks but stays black for ~2 s, the script falls back to `Desktop`,
+  re-hooks once and keeps that game off `Game` for 60 s, so clips never end up
+  black with sound.
 - **Sounds** — enable/disable and pick a `.wav` file for each event.
 - **Naming rules** — path-specific names, `.exe` name fixes, and the `Other` folder list.
 - **Updates** — manual update check and a button to open the latest release.

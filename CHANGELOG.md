@@ -11,6 +11,13 @@ All notable changes to Moment Replays are documented here.
   the switch never shows black frames. Off by default; it only runs when the
   setting is on **and** both scenes and the source exist. Existing settings
   files are migrated with it **off** (settings schema 6).
+  - **Black-capture fallback:** a game that hooks but delivers only black
+    frames (anti-cheat, HDR, hybrid GPUs, swapchain recreate after alt-tab)
+    is detected from a tiny GPU readback of the capture once per second. Black
+    for ~2 s on `Game` → back to `Desktop` (Display Capture still shows the
+    game), one automatic re-hook, and a 60 s per-game cooldown so scenes can't
+    flap. `Game` is only entered once the capture shows a non-black frame, so a
+    black loading screen just delays it.
 - **`.moment.json` metadata** next to every saved clip and recording (replay
   buffer, short clip, alternative folder, recordings, alternative recordings):
   the game, an app/scene timeline, markers, recorded audio tracks and the

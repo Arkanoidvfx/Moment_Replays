@@ -55,6 +55,10 @@ class CONSTANTS:
     ALT_RECORDING_WATCHDOG_MS = 8000
     FOREGROUND_TICK_MS = 1000
     AUTO_SCENE_DEBOUNCE_S = 1.5
+    BLACK_LUMA_THRESHOLD = 12      # brightest R/G/B value (0..255) at or below which a frame is "black"
+    BLACK_FALLBACK_S = 2.0         # black this long on the Game scene -> show Desktop
+    BLACK_COOLDOWN_S = 60.0        # then keep that process off the Game scene this long
+    BLACK_SAMPLE_SIZE = (32, 18)   # downscaled readback of the game capture
     MARK_FEEDBACK_MS = 200
     TIMELINE_LOG_MAXLEN = 10000
     MARKERS_MAXLEN = 1000
@@ -150,6 +154,11 @@ class VARIABLES:
     auto_scene_blocked = False
     auto_scene_switch_in_flight = False
     auto_scene_status = ""
+    auto_scene_showing_held = False   # our obs_source_inc_showing ref on the game capture
+    auto_scene_rehook_phase = ""      # "", "pending" (wait for Desktop), "released" (ref dropped)
+    black_guard = None                # BlackFrameGuard, lives for the whole OBS session
+    luma_sampler = None               # CaptureLumaSampler, created on first use
+    luma_sampler_disabled = False
     sidecar_persist_enabled = False
     update_check_in_progress = False
     update_status_props = None
@@ -3505,7 +3514,8 @@ class AutoSceneMachine:
         self.lost_since: float | None = None
 
     def decide(self, now: float, current_scene: str, fg_exe: str, fg_is_game: bool,
-               game_scene: str, desktop_scene: str) -> str | None:
+               game_scene: str, desktop_scene: str, game_allowed: bool = True) -> str | None:
+        """`game_allowed` (from BlackFrameGuard) only gates Desktop -> Game."""
         if current_scene not in (game_scene, desktop_scene):
             self.lost_since = None
             return None
@@ -3515,7 +3525,7 @@ class AutoSceneMachine:
 
         if current_scene == desktop_scene:
             self.lost_since = None
-            return game_scene if in_game else None
+            return game_scene if in_game and game_allowed else None
 
         if hooked is None:
             self.lost_since = None
@@ -3530,6 +3540,238 @@ class AutoSceneMachine:
             self.lost_since = None
             return desktop_scene
         return None
+
+
+class BlackFrameGuard:
+    """
+    "Hooked but black" protection (anti-cheat, HDR, hybrid GPUs, swapchain recreate), per
+    process, for the whole OBS session.
+
+    - observe(): the capture's brightest sampled channel (0..255); None = unknown/no sample.
+    - should_fall_back(): black for `window_s` while on Game -> show Desktop (Display Capture
+      still shows the game, so clips never end up black with sound).
+    - fall_back(): puts the process on a cooldown so the scenes can't flap; True the first
+      time per process, when one rehook is worth a try.
+    - can_show_game(): no cooldown AND the latest sample is not black. Unknown counts as fine,
+      so a missing sampler never blocks Game; a black loading screen only delays Game until
+      a non-black frame arrives (after any cooldown).
+    """
+
+    def __init__(self, threshold: int = CONSTANTS.BLACK_LUMA_THRESHOLD,
+                 window_s: float = CONSTANTS.BLACK_FALLBACK_S,
+                 cooldown_s: float = CONSTANTS.BLACK_COOLDOWN_S):
+        self.threshold = threshold
+        self.window_s = window_s
+        self.cooldown_s = cooldown_s
+        self.luma: int | None = None
+        self.black_since: float | None = None
+        self.cooldown_until: dict[str, float] = {}
+        self.rehooked: set[str] = set()
+
+    def is_black(self) -> bool:
+        return self.luma is not None and self.luma <= self.threshold
+
+    def observe(self, now: float, luma: int | None) -> None:
+        self.luma = luma
+        if not self.is_black():
+            self.black_since = None
+        elif self.black_since is None:
+            self.black_since = now
+
+    def should_fall_back(self, now: float) -> bool:
+        return self.black_since is not None and now - self.black_since >= self.window_s
+
+    def fall_back(self, now: float, process: str) -> bool:
+        self.cooldown_until[process] = now + self.cooldown_s
+        self.black_since = None
+        if process in self.rehooked:
+            return False
+        self.rehooked.add(process)
+        return True
+
+    def can_show_game(self, now: float, process: str) -> bool:
+        return now >= self.cooldown_until.get(process, 0.0) and not self.is_black()
+
+
+def max_rgb(raw: bytes, width: int, height: int, linesize: int) -> int:
+    """Brightest colour channel of an RGBA/BGRA pixel buffer (alpha ignored)."""
+    best = 0
+    for y in range(height):
+        row = raw[y * linesize:y * linesize + width * 4]
+        best = max(best, max(row[0::4]), max(row[1::4]), max(row[2::4]))
+    return best
+
+
+GS_RGBA = 3          # enum gs_color_format (checked against obspython, OBS 33)
+GS_ZS_NONE = 0       # enum gs_zstencil_format
+GS_CLEAR_COLOR = 1
+
+GFX_PROTOTYPES = {
+    "obs_enter_graphics": (None, ()),
+    "obs_leave_graphics": (None, ()),
+    "obs_get_source_by_name": (ctypes.c_void_p, (ctypes.c_char_p,)),
+    "obs_source_release": (None, (ctypes.c_void_p,)),
+    "obs_source_get_width": (ctypes.c_uint32, (ctypes.c_void_p,)),
+    "obs_source_get_height": (ctypes.c_uint32, (ctypes.c_void_p,)),
+    "obs_source_video_render": (None, (ctypes.c_void_p,)),
+    "gs_texrender_create": (ctypes.c_void_p, (ctypes.c_int, ctypes.c_int)),
+    "gs_texrender_destroy": (None, (ctypes.c_void_p,)),
+    "gs_texrender_reset": (None, (ctypes.c_void_p,)),
+    "gs_texrender_begin": (ctypes.c_bool, (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32)),
+    "gs_texrender_end": (None, (ctypes.c_void_p,)),
+    "gs_texrender_get_texture": (ctypes.c_void_p, (ctypes.c_void_p,)),
+    "gs_clear": (None, (ctypes.c_uint32, ctypes.c_void_p, ctypes.c_float, ctypes.c_uint8)),
+    "gs_ortho": (None, (ctypes.c_float,) * 6),
+    "gs_stagesurface_create": (ctypes.c_void_p, (ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int)),
+    "gs_stagesurface_destroy": (None, (ctypes.c_void_p,)),
+    "gs_stage_texture": (None, (ctypes.c_void_p, ctypes.c_void_p)),
+    "gs_stagesurface_map": (ctypes.c_bool, (ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                                            ctypes.POINTER(ctypes.c_uint32))),
+    "gs_stagesurface_unmap": (None, (ctypes.c_void_p,)),
+}
+
+
+def load_obs_graphics():
+    """
+    ctypes view of obs.dll for the GPU readback. PyDLL keeps the GIL during calls (like the
+    obspython wrappers): releasing it while this thread holds the graphics context could
+    deadlock against another Python thread that wants the graphics context.
+    """
+    gfx = ctypes.PyDLL("obs.dll", handle=get_loaded_module_handle("obs.dll"))
+    for name, (restype, argtypes) in GFX_PROTOTYPES.items():
+        function = getattr(gfx, name)
+        function.restype = restype
+        function.argtypes = argtypes
+    return gfx
+
+
+class CaptureLumaSampler:
+    """
+    Brightest channel of a 32x18 downscale of the game capture, read back from the GPU on the
+    OBS graphics thread (1 s tick). Each call returns the frame staged by the previous call and
+    stages a new one, so mapping never stalls on the GPU.
+    """
+
+    def __init__(self, gfx):
+        self.gfx = gfx
+        self.texrender = None
+        self.stagesurf = None
+        self.staged = False
+        self._clear_buffer = (ctypes.c_float * 8)()  # zeroed; holds a 16-byte aligned vec4
+
+    def _clear_color(self) -> int:
+        return (ctypes.addressof(self._clear_buffer) + 15) & ~15
+
+    def sample(self, source_name: str) -> int | None:
+        gfx = self.gfx
+        source = gfx.obs_get_source_by_name(source_name.encode("utf-8"))
+        if not source:
+            self.staged = False
+            return None
+        try:
+            width, height = gfx.obs_source_get_width(source), gfx.obs_source_get_height(source)
+            gfx.obs_enter_graphics()
+            try:
+                luma = self._read_staged()
+                if width and height:
+                    self._render_and_stage(source, width, height)
+            finally:
+                gfx.obs_leave_graphics()
+        finally:
+            gfx.obs_source_release(source)
+        return luma
+
+    def _render_and_stage(self, source, width: int, height: int) -> None:
+        gfx = self.gfx
+        sample_w, sample_h = CONSTANTS.BLACK_SAMPLE_SIZE
+        if not self.texrender:
+            self.texrender = gfx.gs_texrender_create(GS_RGBA, GS_ZS_NONE)
+        if not self.stagesurf:
+            self.stagesurf = gfx.gs_stagesurface_create(sample_w, sample_h, GS_RGBA)
+        if not self.texrender or not self.stagesurf:
+            return
+        gfx.gs_texrender_reset(self.texrender)
+        if not gfx.gs_texrender_begin(self.texrender, sample_w, sample_h):
+            return
+        gfx.gs_clear(GS_CLEAR_COLOR, self._clear_color(), 0.0, 0)
+        gfx.gs_ortho(0.0, float(width), 0.0, float(height), -100.0, 100.0)
+        gfx.obs_source_video_render(source)
+        gfx.gs_texrender_end(self.texrender)
+        texture = gfx.gs_texrender_get_texture(self.texrender)
+        if texture:
+            gfx.gs_stage_texture(self.stagesurf, texture)
+            self.staged = True
+
+    def _read_staged(self) -> int | None:
+        if not self.staged:
+            return None
+        self.staged = False
+        data = ctypes.c_void_p()
+        linesize = ctypes.c_uint32()
+        if not self.gfx.gs_stagesurface_map(self.stagesurf, ctypes.byref(data), ctypes.byref(linesize)):
+            return None
+        try:
+            sample_w, sample_h = CONSTANTS.BLACK_SAMPLE_SIZE
+            raw = ctypes.string_at(data.value, linesize.value * sample_h)
+        finally:
+            self.gfx.gs_stagesurface_unmap(self.stagesurf)
+        return max_rgb(raw, sample_w, sample_h, linesize.value)
+
+    def destroy(self) -> None:
+        if not (self.texrender or self.stagesurf):
+            return
+        gfx = self.gfx
+        gfx.obs_enter_graphics()
+        try:
+            if self.texrender:
+                gfx.gs_texrender_destroy(self.texrender)
+            if self.stagesurf:
+                gfx.gs_stagesurface_destroy(self.stagesurf)
+        finally:
+            gfx.obs_leave_graphics()
+        self.texrender = self.stagesurf = None
+        self.staged = False
+
+
+def sample_capture_luma(source_name: str) -> int | None:
+    """Latest brightness sample of the game capture, or None if unavailable (never raises)."""
+    if VARIABLES.luma_sampler_disabled:
+        return None
+    try:
+        if VARIABLES.luma_sampler is None:
+            VARIABLES.luma_sampler = CaptureLumaSampler(load_obs_graphics())
+        return VARIABLES.luma_sampler.sample(source_name)
+    except Exception:
+        VARIABLES.luma_sampler_disabled = True
+        _print("Auto scene: black-frame check is unavailable; auto scene keeps working without it.")
+        _print(traceback.format_exc())
+        return None
+
+
+def run_rehook_step(current_scene: str, desktop_scene: str) -> bool:
+    """
+    One-shot rehook after a black fallback: once Desktop is on air, drop our showing ref for
+    one tick (game capture unhooks when nothing shows it), then take it again (it re-hooks).
+    Returns True while a step ran, so the tick makes no scene decision.
+    """
+    phase = VARIABLES.auto_scene_rehook_phase
+    source = VARIABLES.auto_scene_source
+    if not phase or source is None:
+        return False
+    if phase == "pending":
+        if current_scene != desktop_scene:
+            return False  # the Game scene would keep the capture showing
+        if VARIABLES.auto_scene_showing_held:
+            obs.obs_source_dec_showing(source)
+            VARIABLES.auto_scene_showing_held = False
+        VARIABLES.auto_scene_rehook_phase = "released"
+        _print("Auto scene: re-hooking the game capture once.")
+        return True
+    if not VARIABLES.auto_scene_showing_held:
+        obs.obs_source_inc_showing(source)
+        VARIABLES.auto_scene_showing_held = True
+    VARIABLES.auto_scene_rehook_phase = ""
+    return True
 
 
 class MONITORINFO(ctypes.Structure):
@@ -3649,6 +3891,8 @@ def auto_scene_attach(source_name: str) -> bool:
     obs.signal_handler_connect(handler, "unhooked", on_game_capture_unhooked)
     # Keep the capture hooking while Desktop is on air; balanced in auto_scene_detach().
     obs.obs_source_inc_showing(source)
+    VARIABLES.auto_scene_showing_held = True
+    VARIABLES.auto_scene_rehook_phase = ""
     VARIABLES.auto_scene_source = source
     return True
 
@@ -3664,22 +3908,28 @@ def auto_scene_detach() -> None:
         obs.signal_handler_disconnect(handler, "hooked", on_game_capture_hooked)
         obs.signal_handler_disconnect(handler, "unhooked", on_game_capture_unhooked)
     with suppress(Exception):
-        obs.obs_source_dec_showing(source)
+        if VARIABLES.auto_scene_showing_held:  # not held mid-rehook
+            obs.obs_source_dec_showing(source)
+    VARIABLES.auto_scene_showing_held = False
+    VARIABLES.auto_scene_rehook_phase = ""
     obs.obs_source_release(source)
 
 
-def load_obs_native():
-    """ctypes views of the already-loaded obs.dll and obs-frontend-api.dll."""
+def get_loaded_module_handle(name: str):
+    """Handle of a DLL already loaded in this (OBS) process; never loads another copy."""
     get_module = ctypes.WinDLL("kernel32").GetModuleHandleW
     get_module.argtypes = (wintypes.LPCWSTR,)
     get_module.restype = wintypes.HMODULE
-    libobs_handle = get_module("obs.dll")
-    frontend_handle = get_module("obs-frontend-api.dll")
-    if not libobs_handle or not frontend_handle:
-        raise OSError("obs.dll / obs-frontend-api.dll are not loaded in this process.")
+    handle = get_module(name)
+    if not handle:
+        raise OSError(f"{name} is not loaded in this process.")
+    return handle
 
-    libobs = ctypes.CDLL("obs.dll", handle=libobs_handle)
-    frontend = ctypes.CDLL("obs-frontend-api.dll", handle=frontend_handle)
+
+def load_obs_native():
+    """ctypes views of the already-loaded obs.dll and obs-frontend-api.dll (calls release the GIL)."""
+    libobs = ctypes.CDLL("obs.dll", handle=get_loaded_module_handle("obs.dll"))
+    frontend = ctypes.CDLL("obs-frontend-api.dll", handle=get_loaded_module_handle("obs-frontend-api.dll"))
     libobs.obs_get_source_by_name.argtypes = (ctypes.c_char_p,)
     libobs.obs_get_source_by_name.restype = ctypes.c_void_p
     libobs.obs_source_release.argtypes = (ctypes.c_void_p,)
@@ -3762,12 +4012,31 @@ def auto_scene_tick(executable_path, current_scene: str) -> None:
         return
     set_auto_scene_status(f"on ('{game_scene}' / '{desktop_scene}', source '{source_name}')")
 
+    machine = VARIABLES.auto_scene_machine
+    if VARIABLES.black_guard is None:
+        VARIABLES.black_guard = BlackFrameGuard()
+    guard = VARIABLES.black_guard
+    now = time.monotonic()
+    if run_rehook_step(current_scene, desktop_scene):
+        return
+    guard.observe(now, sample_capture_luma(source_name) if machine.hooked_exe else None)
+
     if VARIABLES.auto_scene_switch_in_flight:
         return
     fg_exe, fg_is_game = classify_foreground(executable_path)
-    target = VARIABLES.auto_scene_machine.decide(
-        time.monotonic(), current_scene, fg_exe, fg_is_game, game_scene, desktop_scene
-    )
+    hooked = machine.hooked_exe
+    process = hooked if hooked not in (None, HOOKED_EXE_UNKNOWN) else fg_exe
+
+    if current_scene == game_scene and hooked and guard.should_fall_back(now):
+        if guard.fall_back(now, process):
+            VARIABLES.auto_scene_rehook_phase = "pending"
+        _print(f"Auto scene: '{source_name}' shows only black frames for {process or 'the game'}; "
+               f"showing '{desktop_scene}' and keeping it off '{game_scene}' for {guard.cooldown_s:.0f}s.")
+        request_scene_switch(desktop_scene)
+        return
+
+    target = machine.decide(now, current_scene, fg_exe, fg_is_game, game_scene, desktop_scene,
+                            game_allowed=guard.can_show_game(now, process))
     if target:
         request_scene_switch(target)
 
@@ -4304,6 +4573,10 @@ def script_unload():
     obs.timer_remove(foreground_tick)
     obs.timer_remove(stop_mark_feedback)
     auto_scene_detach()
+    if VARIABLES.luma_sampler is not None:
+        with suppress(Exception):
+            VARIABLES.luma_sampler.destroy()
+        VARIABLES.luma_sampler = None
     obs.timer_remove(update_status_refresh_timer_callback)
     VARIABLES.update_status_refresh_timer_active = False
     VARIABLES.update_status_props = None
