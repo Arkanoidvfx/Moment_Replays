@@ -165,6 +165,7 @@ class VARIABLES:
     other_obs_checked_at: float | None = None
     other_obs_paused = False
     other_obs_scan_running = False
+    other_obs_answered_at: float | None = None
     other_obs_error_logged = False
     sidecar_persist_enabled = False
     update_check_in_progress = False
@@ -3226,21 +3227,30 @@ def append_clip_exe_history():
 
 def foreground_tick():
     """
-    1 s sampler (OBS video thread): replay-buffer exe history, the moment timeline
-    and the auto scene switcher.
+    1 s sampler (OBS graphics thread): auto scene hook-up, replay-buffer exe history, the
+    moment timeline, then the auto scene decision. The hook-up goes first, while obspython's
+    "current script" is still this one (see auto_scene_prepare): later steps call ctypes
+    WinDLL functions, which release the GIL.
     """
-    append_clip_exe_history()
+    scene = ""
+    with suppress(Exception):
+        scene = get_current_scene_name() or ""  # obspython only: keeps the GIL
+    names = run_auto_scene_step(auto_scene_prepare, scene)
 
+    append_clip_exe_history()
     executable_path = None
     with suppress(Exception):
         executable_path = get_active_executable_path()
-    scene = ""
-    with suppress(Exception):
-        scene = get_current_scene_name() or ""
     record_timeline_sample(time.time(), app_display_name(executable_path), exe_basename(executable_path), scene)
 
+    if names:
+        run_auto_scene_step(auto_scene_switching, executable_path, scene, names)
+
+
+def run_auto_scene_step(step, *args):
+    """Runs one auto scene step; an error detaches, is logged once and retried next tick."""
     try:
-        auto_scene_tick(executable_path, scene)
+        return step(*args)
     except Exception:
         with suppress(Exception):
             auto_scene_detach()
@@ -3248,6 +3258,7 @@ def foreground_tick():
             VARIABLES.auto_scene_status = "error"
             _print("Auto scene: error; it will retry every second.")
             _print(traceback.format_exc())
+        return None
 
 
 # -------------------- moment_metadata.py --------------------
@@ -3469,9 +3480,10 @@ def play_mark_feedback():
     if not (obs.obs_data_get_bool(settings, PN.GR_SOUND_NOTIFICATION_SETTINGS) and
             obs.obs_data_get_bool(settings, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS)):
         return
-    play_sound(obs.obs_data_get_string(settings, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH))
+    # Timer calls need obspython's current script, so they go before play_sound (which releases the GIL).
     obs.timer_remove(stop_mark_feedback)  # at most one pending stop timer
     obs.timer_add(stop_mark_feedback, CONSTANTS.MARK_FEEDBACK_MS)
+    play_sound(obs.obs_data_get_string(settings, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH))
 
 
 def stop_mark_feedback():
@@ -3887,7 +3899,10 @@ def describe_other_obs(processes, own_pid: int, path_of) -> str | None:
 
 
 def scan_other_obs() -> None:
-    """Refreshes VARIABLES.other_obs; a failed scan keeps the previous answer. Never raises."""
+    """
+    Worker thread: refreshes VARIABLES.other_obs. A failed scan keeps the previous answer
+    (logged once). Never raises; calls no obspython API.
+    """
     try:
         VARIABLES.other_obs = describe_other_obs(list_processes(), os.getpid(), get_process_image_path)
     except Exception:
@@ -3896,29 +3911,32 @@ def scan_other_obs() -> None:
             _print("Auto scene: cannot list processes to look for another OBS.")
             _print(traceback.format_exc())
     finally:
+        VARIABLES.other_obs_answered_at = time.monotonic()
         VARIABLES.other_obs_scan_running = False
 
 
-def poll_other_obs(now: float) -> str | None:
+def other_obs_answer(now: float) -> tuple[bool, str | None]:
+    """(answer is fresh, description of another running OBS or None)."""
+    answered_at = VARIABLES.other_obs_answered_at
+    fresh = answered_at is not None and now - answered_at < 2 * CONSTANTS.OTHER_OBS_CHECK_S
+    return fresh, VARIABLES.other_obs
+
+
+def request_other_obs_scan(now: float) -> None:
     """
-    Another running OBS (description) or None, re-checked every OTHER_OBS_CHECK_S.
-    A scan costs several ms, so routine re-checks run on a worker thread (not the OBS graphics
-    thread); without a fresh answer (first use, or auto scene was off) it scans synchronously,
-    so the capture is never attached on a stale "no other OBS".
+    Starts a background scan every OTHER_OBS_CHECK_S. A scan costs several ms (too much for the
+    OBS graphics thread) and releases the GIL hundreds of times, so it never runs inside the tick.
     """
     checked_at = VARIABLES.other_obs_checked_at
-    age = None if checked_at is None else now - checked_at
-    if age is None or age >= 2 * CONSTANTS.OTHER_OBS_CHECK_S:
-        VARIABLES.other_obs_checked_at = now
-        scan_other_obs()
-    elif age >= CONSTANTS.OTHER_OBS_CHECK_S and not VARIABLES.other_obs_scan_running:
-        VARIABLES.other_obs_checked_at = now
-        VARIABLES.other_obs_scan_running = True
-        try:
-            Thread(target=scan_other_obs, daemon=True).start()
-        except Exception:
-            VARIABLES.other_obs_scan_running = False
-    return VARIABLES.other_obs
+    if VARIABLES.other_obs_scan_running or (
+            checked_at is not None and now - checked_at < CONSTANTS.OTHER_OBS_CHECK_S):
+        return
+    VARIABLES.other_obs_checked_at = now
+    VARIABLES.other_obs_scan_running = True
+    try:
+        Thread(target=scan_other_obs, daemon=True).start()
+    except Exception:
+        VARIABLES.other_obs_scan_running = False
 
 
 _OBS_NATIVE = None  # (libobs, frontend) ctypes handles, loaded on first scene switch
@@ -3996,7 +4014,15 @@ def on_game_capture_unhooked(calldata):
         machine.hooked_exe = None
 
 
+GAME_CAPTURE_SIGNALS = (("hooked", on_game_capture_hooked), ("unhooked", on_game_capture_unhooked))
+
+
 def auto_scene_attach(source_name: str) -> bool:
+    """
+    Takes the game capture: strong ref, hooked/unhooked signals, showing ref. Must run while
+    obspython's current script is this one (see auto_scene_prepare). If connecting fails, every
+    partial step is undone before the error propagates, so nothing leaks.
+    """
     source = get_live_source(source_name)
     if source is None:
         return False
@@ -4011,8 +4037,18 @@ def auto_scene_attach(source_name: str) -> bool:
     VARIABLES.auto_scene_machine = machine
 
     handler = obs.obs_source_get_signal_handler(source)
-    obs.signal_handler_connect(handler, "hooked", on_game_capture_hooked)
-    obs.signal_handler_connect(handler, "unhooked", on_game_capture_unhooked)
+    connected = []
+    try:
+        for signal, callback in GAME_CAPTURE_SIGNALS:
+            obs.signal_handler_connect(handler, signal, callback)
+            connected.append((signal, callback))
+    except Exception:
+        for signal, callback in connected:
+            with suppress(Exception):
+                obs.signal_handler_disconnect(handler, signal, callback)
+        VARIABLES.auto_scene_machine = None
+        obs.obs_source_release(source)
+        raise
     # Keep the capture hooking while Desktop is on air; balanced in auto_scene_detach().
     obs.obs_source_inc_showing(source)
     VARIABLES.auto_scene_showing_held = True
@@ -4027,10 +4063,14 @@ def auto_scene_detach() -> None:
         return
     VARIABLES.auto_scene_source = None
     VARIABLES.auto_scene_machine = None
+    handler = None
     with suppress(Exception):
         handler = obs.obs_source_get_signal_handler(source)
-        obs.signal_handler_disconnect(handler, "hooked", on_game_capture_hooked)
-        obs.signal_handler_disconnect(handler, "unhooked", on_game_capture_unhooked)
+    for signal, callback in GAME_CAPTURE_SIGNALS:
+        # A failed disconnect is harmless: the callbacks ignore signals while detached, and
+        # OBS drops the script's callbacks when the script unloads.
+        with suppress(Exception):
+            obs.signal_handler_disconnect(handler, signal, callback)
     with suppress(Exception):
         if VARIABLES.auto_scene_showing_held:  # not held mid-rehook
             obs.obs_source_dec_showing(source)
@@ -4108,17 +4148,26 @@ def request_scene_switch(name: str) -> None:
         _print(traceback.format_exc())
 
 
-def auto_scene_tick(executable_path, current_scene: str) -> None:
+def auto_scene_prepare(current_scene: str) -> tuple[str, str, str] | None:
     """
-    Runs every second. Auto scene is active only when the setting is on AND both scenes and
-    the game capture source exist; otherwise the source is released and nothing is switched.
+    First step of every tick: decides whether auto scene is active and attaches/detaches the
+    game capture. Returns (game scene, desktop scene, source name) when switching should run.
+
+    Everything that registers or removes Python callbacks (signal connect/disconnect) happens
+    here, before anything that releases the GIL (ctypes WinDLL calls, thread starts). obspython
+    keeps "the current script" in one process-wide variable; while this thread has released the
+    GIL another thread's script callback can end and reset it, and signal_handler_connect then
+    fails with "No active script" (seen on the first tick after load in OBS 33).
+
+    Active only when the setting is on, both scenes and the game capture exist, and a fresh
+    process scan found no other OBS.
     """
     settings = VARIABLES.script_settings
     if (settings is None or VARIABLES.auto_scene_blocked or
             not obs.obs_data_get_bool(settings, PN.PROP_AUTO_SCENE_ENABLED)):
         auto_scene_detach()
         set_auto_scene_status("off")
-        return
+        return None
 
     game_scene = obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_GAME)
     desktop_scene = obs.obs_data_get_string(settings, PN.PROP_AUTO_SCENE_DESKTOP)
@@ -4126,32 +4175,60 @@ def auto_scene_tick(executable_path, current_scene: str) -> None:
     if game_scene == desktop_scene or not (scene_exists(game_scene) and scene_exists(desktop_scene)):
         auto_scene_detach()
         set_auto_scene_status(f"waiting for scenes '{game_scene}' and '{desktop_scene}'")
-        return
+        return None
 
-    # Only one OBS can hold a game's hook: while another OBS runs, release the capture
-    # (game capture unhooks once nothing shows it) and stay off the Game scene.
-    other_obs = poll_other_obs(time.monotonic())
-    if other_obs:
-        auto_scene_detach()
-        VARIABLES.other_obs_paused = True
-        set_auto_scene_status(
-            f"another OBS is running ({other_obs}); game capture paused so its game hook is left alone")
-        if current_scene == game_scene and not VARIABLES.auto_scene_switch_in_flight:
-            request_scene_switch(desktop_scene)
-        return
-    if VARIABLES.other_obs_paused:
-        VARIABLES.other_obs_paused = False
-        _print("Auto scene: no other OBS is running any more; resuming game capture.")
+    now = time.monotonic()
+    fresh, other_obs = other_obs_answer(now)
+    try:
+        # Only one OBS can hold a game's hook: while another OBS runs, release the capture
+        # (game capture unhooks once nothing shows it) and stay off the Game scene.
+        if other_obs:
+            auto_scene_detach()
+            VARIABLES.other_obs_paused = True
+            set_auto_scene_status(
+                f"another OBS is running ({other_obs}); game capture paused so its game hook is left alone")
+            if current_scene == game_scene and not VARIABLES.auto_scene_switch_in_flight:
+                request_scene_switch(desktop_scene)
+            return None
+        if not fresh:  # never attach on a stale "no other OBS" (first tick, or auto scene was off)
+            auto_scene_detach()
+            set_auto_scene_status("checking whether another OBS is running")
+            return None
+        if VARIABLES.other_obs_paused:
+            VARIABLES.other_obs_paused = False
+            _print("Auto scene: no other OBS is running any more; resuming game capture.")
 
-    source = VARIABLES.auto_scene_source
-    if source is not None and (obs.obs_source_removed(source) or obs.obs_source_get_name(source) != source_name):
-        auto_scene_detach()
-    if VARIABLES.auto_scene_source is None and not auto_scene_attach(source_name):
-        set_auto_scene_status(f"waiting for game capture source '{source_name}'")
-        return
-    set_auto_scene_status(f"on ('{game_scene}' / '{desktop_scene}', source '{source_name}')")
+        source = VARIABLES.auto_scene_source
+        if source is not None and (obs.obs_source_removed(source) or obs.obs_source_get_name(source) != source_name):
+            auto_scene_detach()
+        if VARIABLES.auto_scene_source is None:
+            try:
+                attached = auto_scene_attach(source_name)
+            except RuntimeError:  # "No active script": already cleaned up, retry next tick
+                set_auto_scene_status("OBS script context was busy; retrying the game capture next second")
+                return None
+            if not attached:
+                set_auto_scene_status(f"waiting for game capture source '{source_name}'")
+                return None
+        set_auto_scene_status(f"on ('{game_scene}' / '{desktop_scene}', source '{source_name}')")
+        return game_scene, desktop_scene, source_name
+    finally:
+        request_other_obs_scan(now)  # starts a thread (releases the GIL): keep it last
 
+
+def auto_scene_tick(executable_path, current_scene: str) -> None:
+    """One auto scene tick, in the order foreground_tick runs it."""
+    names = auto_scene_prepare(current_scene)
+    if names:
+        auto_scene_switching(executable_path, current_scene, names)
+
+
+def auto_scene_switching(executable_path, current_scene: str, names: tuple[str, str, str]) -> None:
+    """Second step of the tick: black-frame check, rehook and the Game/Desktop decision."""
+    game_scene, desktop_scene, source_name = names
     machine = VARIABLES.auto_scene_machine
+    if machine is None:  # detached by another thread since prepare
+        return
     if VARIABLES.black_guard is None:
         VARIABLES.black_guard = BlackFrameGuard()
     guard = VARIABLES.black_guard
