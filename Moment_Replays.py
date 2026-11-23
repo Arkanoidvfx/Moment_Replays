@@ -4827,6 +4827,15 @@ class KeyRecorder:
             self._thread.join(timeout=2)
 
     def _run(self) -> None:
+        # Event.wait follows the Windows timer: 15.6 ms by default (about 65 polls a second, measured).
+        winmm = ctypes.WinDLL("winmm")
+        winmm.timeBeginPeriod(1)
+        try:
+            self._poll_until_stopped()
+        finally:
+            winmm.timeEndPeriod(1)
+
+    def _poll_until_stopped(self) -> None:
         due = time.perf_counter()
         while not self._stop.is_set():
             try:
