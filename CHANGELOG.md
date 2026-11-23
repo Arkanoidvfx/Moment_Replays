@@ -10,10 +10,11 @@ All notable changes to Moment Replays are documented here.
   finished plain MP4 still gets `<clip>.moment.json`, as in 1.6. Recordings are handled
   after OBS has finished writing the file (up to 10 s). Toggle: *Store clip info inside
   the clip* (on by default).
-- **Accurate clip times** — a clip now ends when its save was *requested*, not when OBS
-  reported it saved (0.2–0.4 s later with NVENC, more with x264 lookahead), so `F8` marks
-  no longer sit too early. The request time comes from the script's own hotkeys, OBS's
-  *Save Replay* key, or the new file's creation time; recordings use the stop request.
+- **Accurate clip times** — a clip's end is now taken from when its save was *requested*
+  (plus the few frames OBS still adds), not from when OBS reported it saved (0.2–0.4 s
+  later with NVENC, over 1 s with x264), so `F8` marks no longer sit too early. The
+  request time comes from the script's own hotkeys, OBS's *Save Replay* key, or the new
+  file's creation time; recordings use the stop request.
 - **Key presses (opt-in, off by default)** — the press times of a fixed set of game keys
   and mouse buttons, recorded only while a game is the window in front and stored inside
   the clip for Moment Player. See the README for exactly what and when.

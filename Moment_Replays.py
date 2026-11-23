@@ -74,9 +74,13 @@ class CONSTANTS:
     INFO_TAG_PADDING = 256          # spaces after the JSON, so it can be rewritten in place
     INFO_RETRY_S = 10.0             # OBS reports "stopped" before its file writer has finished
     INFO_RETRY_INTERVAL_S = 0.5
-    # Clip end = the moment the save/stop was requested; see pick_clip_end().
-    CLIP_CREATED_LAG_S = 0.25       # calibration: a replay file appears this long after the request
-    SAVE_KEY_MAX_LEAD_S = 2.0       # a save-key press older than this did not cause the file
+    # Clip end = a few frames after the save/stop was requested; see pick_clip_end(). Calibrated live on
+    # OBS 33.0.1 (NVENC and x264, 30 and 60 fps): B-frame reorder plus the packet that ends the clip.
+    REPLAY_END_FRAMES = 3.0
+    RECORDING_END_FRAMES = 1.5
+    CLIP_CREATED_LAG_S = 0.25       # replay file created minus clip end, until a key save shows the real value
+    SAVE_KEY_MAX_LEAD_S = 5.0       # a save-key press older than this did not cause the file (x264: 1.2 s, AMF: 1.8 s)
+    CREATED_MAX_AGE_S = 600.0       # writing a big buffer to a slow disk takes a while; older is not this file
     KEY_POLL_S = 0.01
     KEY_LOG_MAXLEN = 100_000        # press intervals per key
     FILENAME_PROHIBITED_CHARS = r'/\:"<>*?|%'
@@ -170,8 +174,10 @@ class VARIABLES:
     buffer_max_time = 0
     # Clip info anchor and key recorder (see pick_clip_end, KeyRecorder)
     save_requested_at: float | None = None      # script hotkeys: just before obs_frontend_replay_buffer_save()
-    save_key_vks: tuple[int, ...] = ()          # OBS's own "Save Replay" bindings, as virtual keys
+    save_key_bindings: tuple = ()               # OBS's own "Save Replay" keys: (virtual key, modifier names)
+    save_key_problem = ""                       # why there are none, as last logged
     save_key_presses: deque = deque(maxlen=64)  # wall times those keys went down
+    created_lag = CONSTANTS.CLIP_CREATED_LAG_S  # learned from the last save with a known request
     pending_info_writes: set = set()            # worker threads still writing clip info
     unloading = Event()
     record_inputs = False                       # cached: the key thread must not call obspython
@@ -3170,7 +3176,8 @@ def on_recording_stopped_callback(event):
     cancel_alt_recording_watchdog()
     restore_recording_path()
 
-    clip_end, VARIABLES.recording_stop_at = VARIABLES.recording_stop_at or time.time(), None
+    stop_at, VARIABLES.recording_stop_at = VARIABLES.recording_stop_at, None
+    clip_end = time.time() if stop_at is None else stop_at + frames_to_seconds(CONSTANTS.RECORDING_END_FRAMES)
     origin = "alt_recording" if VARIABLES.alt_recording_pending else "recording"
     started_at, VARIABLES.recording_started_at = VARIABLES.recording_started_at, None
     last_recording = None
@@ -3206,6 +3213,7 @@ def reset_buffer_history() -> None:
     with suppress(Exception):
         VARIABLES.buffer_max_time = int(get_replay_buffer_max_time() or 0)
     VARIABLES.save_key_presses.clear()
+    VARIABLES.save_key_bindings = read_save_key_bindings()
     VARIABLES.clip_exe_history = deque([], maxlen=get_replay_buffer_max_time())
     VARIABLES.clip_exe_counts = {}
     VARIABLES.cached_active_window_pid = None
@@ -3270,8 +3278,11 @@ def on_buffer_save_callback(event):
         return
 
     VARIABLES.last_saved_clip_path = path
-    clip_end, anchor = pick_clip_end(event_at, get_file_created_at(path), VARIABLES.save_requested_at,
-                                     list(VARIABLES.save_key_presses))
+    created_at = get_file_created_at(path)
+    clip_end, anchor = pick_clip_end(event_at, created_at, VARIABLES.save_requested_at,
+                                     list(VARIABLES.save_key_presses),
+                                     frames_to_seconds(CONSTANTS.REPLAY_END_FRAMES), VARIABLES.created_lag)
+    learn_created_lag(anchor, created_at, clip_end)
     while VARIABLES.save_key_presses and VARIABLES.save_key_presses[0] <= event_at:
         VARIABLES.save_key_presses.popleft()  # older saves can't claim them
     _print(f"Clip end taken from: {anchor}")
@@ -3294,7 +3305,7 @@ def on_buffer_save_callback(event):
     # Timer calls come before any thread start: a thread start releases the GIL, and another script
     # callback may then leave OBS without a current script ("No active script").
     reset_forced_save_state()
-    VARIABLES.save_key_vks = read_save_key_vks()  # the binding may have changed since the buffer started
+    VARIABLES.save_key_bindings = read_save_key_bindings()  # may have changed since the buffer started
     if short_job is None or not run_info_writer(trim_half_clip_async, *short_job):
         write_clip_info_async(path, full_metadata)
         VARIABLES.save_in_progress = False
@@ -3509,14 +3520,24 @@ def get_audio_tracks() -> list[dict]:
     ]
 
 
-def get_recording_preset(output_getter_name: str) -> dict:
-    """Encoder id, rate control, quality, scaled size and fps of the output that wrote the clip."""
-    preset = dict.fromkeys(RECORDING_PRESET_KEYS)
+def get_output_fps() -> float | None:
     with suppress(Exception):
         video_info = obs.obs_video_info()
         if obs.obs_get_video_info(video_info) and video_info.fps_den:
-            fps = video_info.fps_num / video_info.fps_den
-            preset["fps"] = int(fps) if float(fps).is_integer() else round(fps, 3)
+            return video_info.fps_num / video_info.fps_den
+    return None
+
+
+def frames_to_seconds(frames: float) -> float:
+    return frames / (get_output_fps() or 60.0)
+
+
+def get_recording_preset(output_getter_name: str) -> dict:
+    """Encoder id, rate control, quality, scaled size and fps of the output that wrote the clip."""
+    preset = dict.fromkeys(RECORDING_PRESET_KEYS)
+    fps = get_output_fps()
+    if fps:
+        preset["fps"] = int(fps) if float(fps).is_integer() else round(fps, 3)
 
     getter = getattr(obs, output_getter_name, None)
     output = getter() if getter is not None else None
@@ -3552,57 +3573,65 @@ def get_file_created_at(path: Path | str) -> float | None:
     return None
 
 
-def read_save_key_vks() -> tuple[int, ...]:
-    """Virtual keys bound to OBS's own "Save Replay" hotkey (its output hotkey)."""
-    vks = []
-    with suppress(Exception):
-        output = obs.obs_frontend_get_replay_buffer_output()
-        if output is None:
-            return ()
-        try:
-            hotkeys = obs.obs_hotkeys_save_output(output)
-            if hotkeys is None:
-                return ()
-            try:
-                bindings = obs.obs_data_get_array(hotkeys, SAVE_KEY_HOTKEY)
-                for i in range(obs.obs_data_array_count(bindings) if bindings is not None else 0):
-                    binding = obs.obs_data_array_item(bindings, i)
-                    key = obs.obs_key_from_name(obs.obs_data_get_string(binding, "key"))
-                    obs.obs_data_release(binding)
-                    vk = obs.obs_key_to_virtual_key(key)
-                    if vk:
-                        vks.append(vk)
-                if bindings is not None:
-                    obs.obs_data_array_release(bindings)
-            finally:
-                obs.obs_data_release(hotkeys)
-        finally:
-            obs.obs_output_release(output)
-    return tuple(vks)
-
-
-def pick_clip_end(now: float, created_at: float | None, requested_at: float | None, presses) -> tuple[float, str]:
+def read_save_key_bindings() -> tuple:
     """
-    (wall time of the clip's last moment, how it was found). OBS cuts the clip where the save was
-    *requested*; the SAVED event comes later (encoder latency plus the write), and marks anchored to
-    that would be early by as much. In order: a script hotkey's request, OBS's own save key, the new
-    file's creation time, and only then the event time.
-
-    Presses count only within SAVE_KEY_MAX_LEAD_S before the saved file was created. If the key was
-    pressed again while the encoder was catching up, OBS ends the clip at the last press before the
-    file was opened.
+    (virtual key, modifier names) of every key bound to OBS's own "Save Replay", read from the profile
+    the way OBS loads it. The replay output has no hotkey of its own in OBS 33. Logs once when there is none.
     """
-    if created_at is not None and not now - 60 <= created_at <= now + 1:
+    bindings, problem = [], "no key is bound to it"
+    try:
+        for name, array in SAVE_KEY_SOURCES:
+            raw = get_obs_config("Hotkeys", name)
+            if not raw:
+                continue
+            for item in json.loads(raw).get(array) or ():
+                vk = obs.obs_key_to_virtual_key(obs.obs_key_from_name(item.get("key") or ""))
+                if vk:
+                    bindings.append((vk, frozenset(m for m in SAVE_KEY_MODIFIERS if item.get(m))))
+            break
+    except Exception as error:
+        problem = f"its binding cannot be read ({type(error).__name__})"
+    if bindings:
+        problem = ""
+    if problem and problem != VARIABLES.save_key_problem:
+        _print(f"OBS's Save Replay hotkey: {problem}. Replay ends are estimated from the file's creation time.")
+    VARIABLES.save_key_problem = problem
+    return tuple(bindings)
+
+
+def pick_clip_end(now: float, created_at: float | None, requested_at: float | None, presses,
+                  shift: float, created_lag: float) -> tuple[float, str]:
+    """
+    (wall time of the clip's last moment, how it was found). OBS cuts the clip `shift` seconds after the
+    save was *requested*; the SAVED event comes later (encoder latency plus the write), and marks
+    anchored to that would be early by as much. In order: a script hotkey's request, OBS's own save
+    key, the new file's creation time minus `created_lag`, and only then the event time.
+
+    Presses count only within SAVE_KEY_MAX_LEAD_S before the saved file was created, and the last one
+    wins: OBS overwrites a pending save's time when the key is pressed again.
+    """
+    if created_at is not None and not now - CONSTANTS.CREATED_MAX_AGE_S <= created_at <= now + 1:
         created_at = None  # a wrong clock or a file from some other time
     limit = now if created_at is None else created_at
     if requested_at is not None and limit - 30 <= requested_at <= limit + 0.1:
-        return requested_at, "script hotkey"
+        return requested_at + shift, ANCHOR_SCRIPT_HOTKEY
     recent = [p for p in presses if limit - CONSTANTS.SAVE_KEY_MAX_LEAD_S <= p <= limit]
     if recent:
-        return max(recent), "OBS save key"
+        return max(recent) + shift, ANCHOR_SAVE_KEY
     if created_at is not None:
-        return created_at - CONSTANTS.CLIP_CREATED_LAG_S, "file creation time"
+        return created_at - created_lag, "file creation time"
     return now, "save event"
+
+
+def learn_created_lag(anchor: str, created_at: float | None, clip_end: float) -> None:
+    """
+    How long after its clip's end a replay file appears depends on the encoder (NVENC 0.2 s, x264 1.2 s):
+    remember it from saves whose end is known, for the ones whose end isn't (tray, Stream Deck).
+    """
+    if anchor in (ANCHOR_SCRIPT_HOTKEY, ANCHOR_SAVE_KEY) and created_at is not None:
+        lag = created_at - clip_end
+        if 0 < lag <= CONSTANTS.SAVE_KEY_MAX_LEAD_S:
+            VARIABLES.created_lag = lag
 
 
 def get_replay_clip_duration(clip_end: float) -> float:
@@ -4744,7 +4773,11 @@ KEY_NEVER_APPS = frozenset((
     "windowsterminal", "wt", "cmd", "powershell", "pwsh", "conhost", "alacritty", "wezterm-gui", "mintty",
     "code", "cursor", "explorer", "obs64", "obs",
 ))
-SAVE_KEY_HOTKEY = "ReplayBuffer.Save"
+# Profile section "Hotkeys": OBS 33 has its own frontend hotkey and reads the older entry only until that exists.
+SAVE_KEY_SOURCES = (("OBSBasic.SaveReplayBuffer", "bindings"), ("ReplayBuffer", "ReplayBuffer.Save"))
+SAVE_KEY_MODIFIERS = {"shift": (0x10,), "control": (0x11,), "alt": (0x12,), "command": (0x5B, 0x5C)}
+ANCHOR_SCRIPT_HOTKEY = "script hotkey"
+ANCHOR_SAVE_KEY = "OBS save key"
 
 
 class GameInFront:
@@ -4793,7 +4826,8 @@ class GameInFront:
 class KeyRecorder:
     """
     Press times of the keys in KEY_VKS, recorded only while `game_in_front()` says the game is in
-    front, plus the last presses of OBS's own save key (to anchor a replay's end).
+    front, plus the last presses of OBS's own save key (to anchor a replay's end; Shift, Ctrl, Alt
+    and Win are looked at only while that key is down).
 
     One thread polls GetAsyncKeyState about 100 times a second; nothing here hooks anything or runs
     in the game's process. Key times stay in memory (for the length of the buffer/recording) and leave
@@ -4812,8 +4846,8 @@ class KeyRecorder:
         self._open: dict[str, float] = {}  # keys held now: press time
         self._closed: dict[str, deque] = {name: deque(maxlen=CONSTANTS.KEY_LOG_MAXLEN) for name in KEY_VKS}
         self._focus: deque = deque(maxlen=CONSTANTS.KEY_LOG_MAXLEN)  # [start, end or None] while the game was in front
-        self._save_vks: tuple[int, ...] = ()
-        self._save_down: set[int] = set()
+        self._save_bindings: tuple = ()
+        self._save_active: set = set()
         self._error_logged = False
 
     # --- thread ---
@@ -4875,20 +4909,24 @@ class KeyRecorder:
                 self._trim(now)
 
     def _poll_save_keys(self, now: float, read) -> None:
-        vks = VARIABLES.save_key_vks
-        if vks != self._save_vks:  # first poll or changed binding: the low bits are stale
-            self._save_vks = vks
-            self._save_down = {vk for vk in vks if read(vk) & 0x8000}
-            return
-        for vk in vks:
+        """Same rule as OBS: pressed = the key is down with exactly its own modifiers (Ctrl+F10 is not F10)."""
+        bindings = VARIABLES.save_key_bindings
+        changed = bindings != self._save_bindings  # first poll or rebound: low bits and held keys are stale
+        if changed:
+            self._save_bindings, self._save_active = bindings, set()
+        for binding in bindings:
+            vk, modifiers = binding
             state = read(vk)
-            if state & 0x8000:
-                if vk not in self._save_down:
-                    self._save_down.add(vk)
+            match = bool(state & 0x8001) and all(
+                any(read(m) & 0x8000 for m in vks) == (name in modifiers)
+                for name, vks in SAVE_KEY_MODIFIERS.items())
+            if match and state & 0x8000:
+                if binding not in self._save_active and not changed:
                     VARIABLES.save_key_presses.append(now)
-            elif vk in self._save_down:
-                self._save_down.discard(vk)
-            elif state & 1:  # pressed and released between two polls
+                self._save_active.add(binding)
+            elif binding in self._save_active:
+                self._save_active.discard(binding)
+            elif match and not changed:  # pressed and released between two polls
                 VARIABLES.save_key_presses.append(now)
 
     def _poll_keys(self, now: float, game: bool, read) -> None:
@@ -4963,7 +5001,6 @@ def sync_key_recorder() -> None:
     recorder = VARIABLES.key_recorder
     try:
         if wanted and recorder is None:
-            VARIABLES.save_key_vks = read_save_key_vks()
             recorder = KeyRecorder(GameInFront(), _get_async_key_state)
             VARIABLES.key_recorder = recorder
             recorder.start()

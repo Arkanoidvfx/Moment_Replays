@@ -110,10 +110,10 @@ falling back.
 
 `t` values are seconds from the clip's first frame and `duration_s` is the clip's real
 length, read from the saved file (a replay starts on a keyframe, so it is often a few
-seconds shorter than the buffer setting). The end of a clip is the moment its save or
-stop was *requested*: the script takes it from its own hotkey, from OBS's *Save Replay*
-key (the last press before the file was created), or from the new file's creation time;
-for recordings, from the stop event. The app timeline is sampled once per second.
+seconds shorter than the buffer setting). A clip ends a few frames after its save or
+stop was *requested*: the script takes that moment from its own hotkey, from OBS's *Save
+Replay* key (the last press before the file was created), or from the new file's creation
+time; for recordings, from the stop event. The app timeline is sampled once per second.
 
 ```json
 {"schema":"moment.clip/1","origin":"replay_buffer","saved_at":"2026-11-19T21:04:05+01:00","duration_s":35.0,
