@@ -26,6 +26,7 @@ import subprocess
 import time
 import winsound
 from enum import Enum
+from threading import Event
 from threading import Lock
 from threading import Thread
 from threading import current_thread
@@ -47,7 +48,7 @@ WORKER_THREAD_NAME = "MomentReplays-worker"  # every Thread this script starts; 
 
 
 class CONSTANTS:
-    VERSION = "1.6"
+    VERSION = "1.7"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -69,6 +70,15 @@ class CONSTANTS:
     MARKERS_MAXLEN = 1000
     MOMENT_SCHEMA = "moment.clip/1"
     MOMENT_METADATA_SUFFIX = ".moment.json"
+    # Clip info inside the MP4 (contract: moment.clip/1 JSON in the `synopsis` tag).
+    INFO_TAG_PADDING = 256          # spaces after the JSON, so it can be rewritten in place
+    INFO_RETRY_S = 10.0             # OBS reports "stopped" before its file writer has finished
+    INFO_RETRY_INTERVAL_S = 0.5
+    # Clip end = the moment the save/stop was requested; see pick_clip_end().
+    CLIP_CREATED_LAG_S = 0.25       # calibration: a replay file appears this long after the request
+    SAVE_KEY_MAX_LEAD_S = 2.0       # a save-key press older than this did not cause the file
+    KEY_POLL_S = 0.01
+    KEY_LOG_MAXLEN = 100_000        # press intervals per key
     FILENAME_PROHIBITED_CHARS = r'/\:"<>*?|%'
     PATH_PROHIBITED_CHARS = r'"<>*?|%'
     DEFAULT_FILENAME_FORMAT = "%NAME_%d.%m.%Y_%H-%M-%S"
@@ -154,6 +164,18 @@ class VARIABLES:
     deferred_logs: deque = deque(maxlen=1000)  # worker-thread log lines, printed by foreground_tick
     buffer_started_at: float | None = None
     recording_started_at: float | None = None
+    recording_stop_at: float | None = None      # OBS_FRONTEND_EVENT_RECORDING_STOPPING
+    recording_active = False
+    buffer_active = False
+    buffer_max_time = 0
+    # Clip info anchor and key recorder (see pick_clip_end, KeyRecorder)
+    save_requested_at: float | None = None      # script hotkeys: just before obs_frontend_replay_buffer_save()
+    save_key_vks: tuple[int, ...] = ()          # OBS's own "Save Replay" bindings, as virtual keys
+    save_key_presses: deque = deque(maxlen=64)  # wall times those keys went down
+    pending_info_writes: set = set()            # worker threads still writing clip info
+    unloading = Event()
+    record_inputs = False                       # cached: the key thread must not call obspython
+    key_recorder = None
     # Auto scene (Game/Desktop)
     auto_scene_machine = None
     auto_scene_source = None
@@ -214,6 +236,8 @@ class PropertiesNames:
     PROP_AUTO_SCENE_GAME_SOURCE = "auto_scene_game_source"
     PROP_WRITE_MOMENT_METADATA = "write_moment_metadata"
     TXT_WRITE_MOMENT_METADATA_DESC = "write_moment_metadata_desc"
+    PROP_RECORD_INPUTS = "record_inputs"
+    TXT_RECORD_INPUTS_DESC = "record_inputs_desc"
 
     # Clips path settings
     PROP_CLIPS_BASE_PATH = "clips_base_path"
@@ -329,6 +353,7 @@ PERSISTED_BOOL_DEFAULTS = {
     # Opt-in: only the installer's fresh sidecar turns it on (see load_persisted_settings).
     PN.PROP_AUTO_SCENE_ENABLED: False,
     PN.PROP_WRITE_MOMENT_METADATA: True,
+    PN.PROP_RECORD_INPUTS: False,  # a key logger: opt-in only
 }
 
 PERSISTED_INT_DEFAULTS = {
@@ -361,7 +386,7 @@ UI_TEXT = {
     "en": {
         "script_description_summary": (
             "Save replay clips with app or scene names, path and .exe rules, Other folder routing, "
-            "sounds, short clips, Game/Desktop auto scenes, .moment.json metadata, and update checks."
+            "sounds, short clips, Game/Desktop auto scenes, clip info for Moment Player, and update checks."
         ),
         "interface_language": "Interface language",
         "hotkey_settings_tip": "All hotkeys can be changed in OBS Settings -> Hotkeys.",
@@ -483,15 +508,24 @@ UI_TEXT = {
             "Stays off unless both scenes and the game capture source exist, and pauses while another OBS "
             "is running so it never takes that OBS's game hook."
         ),
-        "write_moment_metadata": "Save .moment.json next to clips",
+        "write_moment_metadata": "Store clip info inside the clip",
         "write_moment_metadata_desc": (
-            "Game, app timeline, Mark-moment markers, audio tracks and encoder settings for Moment Player."
+            "Game, app timeline, Mark-moment markers, audio tracks and encoder settings for Moment Player, "
+            "stored inside the MP4 itself (its synopsis tag). If that is not possible (another container or an "
+            "unusual MP4), a .moment.json file is saved next to the clip instead."
+        ),
+        "record_inputs": "Record key presses (shown over clips in Moment Player)",
+        "record_inputs_desc": (
+            "Records when you press 1-5, Q W E R T, A S D F G, Z X C V, Shift, Ctrl, Alt, Space, Tab and the mouse "
+            "buttons, and nothing else, but only while your game is the window in front. The press times are stored "
+            "inside every clip and recording you save and travel with it: anyone who gets the clip can see them. "
+            "Off by default."
         ),
     },
     "ru": {
         "script_description_summary": (
             "Сохраняет replay-клипы с именами по приложениям или сценам, правилами по путям и .exe, "
-            "папкой Other, звуками, короткими клипами, автосценами Game/Desktop, метаданными .moment.json "
+            "папкой Other, звуками, короткими клипами, автосценами Game/Desktop, данными о клипе для Moment Player "
             "и проверкой обновлений."
         ),
         "interface_language": "Язык интерфейса",
@@ -614,9 +648,18 @@ UI_TEXT = {
             "Не работает, пока нет обеих сцен и источника захвата игры, и ставится на паузу, пока запущен "
             "другой OBS, чтобы не забирать у него захват игры."
         ),
-        "write_moment_metadata": "Сохранять .moment.json рядом с клипами",
+        "write_moment_metadata": "Хранить данные о клипе внутри клипа",
         "write_moment_metadata_desc": (
-            "Игра, хронология приложений, метки «Отметить момент», аудиодорожки и настройки энкодера для Moment Player."
+            "Игра, хронология приложений, метки «Отметить момент», аудиодорожки и настройки энкодера для Moment Player "
+            "записываются прямо в MP4 (тег synopsis). Если это невозможно (другой контейнер или необычный MP4), "
+            "рядом с клипом создаётся файл .moment.json."
+        ),
+        "record_inputs": "Записывать нажатия клавиш (показываются поверх клипа в Moment Player)",
+        "record_inputs_desc": (
+            "Записывает моменты нажатий 1-5, Q W E R T, A S D F G, Z X C V, Shift, Ctrl, Alt, Space, Tab и кнопок мыши, "
+            "и ничего больше, и только пока игра - окно на переднем плане. Время нажатий хранится внутри каждого "
+            "сохранённого клипа и записи и передаётся вместе с ними: его увидит каждый, кому вы отправите клип. "
+            "По умолчанию выключено."
         ),
     },
 }
@@ -1094,6 +1137,8 @@ def refresh_localized_properties(props, data=None) -> None:
     set_property_description(moments, PN.TXT_AUTO_SCENE_DESC, auto_scene_desc_text(data))
     set_property_description(moments, PN.PROP_WRITE_MOMENT_METADATA, tr("write_moment_metadata", data=data))
     set_property_description(moments, PN.TXT_WRITE_MOMENT_METADATA_DESC, tr("write_moment_metadata_desc", data=data))
+    set_property_description(moments, PN.PROP_RECORD_INPUTS, tr("record_inputs", data=data))
+    set_property_description(moments, PN.TXT_RECORD_INPUTS_DESC, tr("record_inputs_desc", data=data))
 
     app_rules = get_group_content(props, PN.GR_ALIASES_SETTINGS)
     set_property_description(app_rules, PN.TXT_ALIASES_DESC, tr("path_specific_names_desc", data=data))
@@ -1593,8 +1638,20 @@ def setup_moment_settings(group_obj):
         description=tr("write_moment_metadata_desc"),
         type=obs.OBS_TEXT_INFO
     )
+    inputs_prop = obs.obs_properties_add_bool(
+        props=group_obj,
+        name=PN.PROP_RECORD_INPUTS,
+        description=tr("record_inputs")
+    )
+    obs.obs_properties_add_text(
+        props=group_obj,
+        name=PN.TXT_RECORD_INPUTS_DESC,
+        description=tr("record_inputs_desc"),
+        type=obs.OBS_TEXT_INFO
+    )
     obs.obs_property_set_modified_callback(auto_scene_prop, persist_settings_callback)
     obs.obs_property_set_modified_callback(metadata_prop, persist_settings_callback)
+    obs.obs_property_set_modified_callback(inputs_prop, persist_settings_callback)
 
 
 def setup_update_settings(group_obj):
@@ -2084,6 +2141,7 @@ def flush_deferred_logs() -> None:
 def reset_forced_save_state():
     VARIABLES.force_override_save = False
     VARIABLES.half_buffer_save = False
+    VARIABLES.save_requested_at = None
     cancel_forced_save_watchdog()
     with suppress(RuntimeError):
         CONSTANTS.CLIPS_FORCE_MODE_LOCK.release()
@@ -2951,6 +3009,7 @@ def save_buffer_to_override_folder():
 
     try:
         VARIABLES.force_override_save = True
+        VARIABLES.save_requested_at = time.time()  # the clip ends here
         obs.obs_frontend_replay_buffer_save()
         arm_forced_save_watchdog()
     except Exception:
@@ -2976,6 +3035,7 @@ def save_half_buffer():
     try:
         VARIABLES.force_override_save = False
         VARIABLES.half_buffer_save = True
+        VARIABLES.save_requested_at = time.time()  # the clip ends here
         obs.obs_frontend_replay_buffer_save()
         arm_forced_save_watchdog()
     except Exception:
@@ -2985,7 +3045,8 @@ def save_half_buffer():
 
 
 def is_save_in_progress() -> bool:
-    return VARIABLES.save_in_progress or has_pending_forced_save()
+    """A clip counts as saved only once its info is written."""
+    return VARIABLES.save_in_progress or bool(VARIABLES.pending_info_writes) or has_pending_forced_save()
 
 
 def cancel_pending_open_request() -> None:
@@ -3080,6 +3141,8 @@ def on_recording_started_callback(event):
         return
 
     VARIABLES.recording_started_at = time.time()
+    VARIABLES.recording_stop_at = None
+    VARIABLES.recording_active = True
 
     # The recording is live and has captured its output path. Restore the OBS
     # recording path now so the NEXT (normal) recording is not redirected.
@@ -3090,6 +3153,13 @@ def on_recording_started_callback(event):
         PN.PROP_NOTIFY_RECORDING_ON_START,
         PN.PROP_NOTIFY_RECORDING_ON_START_PATH
     )
+    sync_key_recorder()
+
+
+def on_recording_stopping_callback(event):
+    """The end of a recording is when it was asked to stop, not when OBS reports it stopped."""
+    if event == getattr(obs, "OBS_FRONTEND_EVENT_RECORDING_STOPPING", None):
+        VARIABLES.recording_stop_at = time.time()
 
 
 def on_recording_stopped_callback(event):
@@ -3100,7 +3170,7 @@ def on_recording_stopped_callback(event):
     cancel_alt_recording_watchdog()
     restore_recording_path()
 
-    clip_end = time.time()
+    clip_end, VARIABLES.recording_stop_at = VARIABLES.recording_stop_at or time.time(), None
     origin = "alt_recording" if VARIABLES.alt_recording_pending else "recording"
     started_at, VARIABLES.recording_started_at = VARIABLES.recording_started_at, None
     last_recording = None
@@ -3116,24 +3186,26 @@ def on_recording_stopped_callback(event):
 
     # Only for a recording we saw start; otherwise last_recording may be an older file.
     if last_recording and started_at is not None:
-        write_moment_metadata(last_recording, collect_moment_metadata(
+        write_clip_info_async(last_recording, collect_moment_metadata(
             origin, clip_end, clip_end - started_at, "obs_frontend_get_recording_output"))
+    VARIABLES.recording_active = False
 
     play_recording_sound_notification(
         PN.PROP_NOTIFY_RECORDING_ON_STOP,
         PN.PROP_NOTIFY_RECORDING_ON_STOP_PATH
     )
+    sync_key_recorder()
 
 
-def on_buffer_recording_started_callback(event):
-    """
-    Resets and starts recording executables history.
-    """
-    if event != obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
-        return
-
+def reset_buffer_history() -> None:
+    """Resets and starts recording executables history."""
     # Reset exe history; foreground_tick() fills it every second while it exists.
     VARIABLES.buffer_started_at = time.time()
+    VARIABLES.buffer_active = True
+    VARIABLES.buffer_max_time = 0
+    with suppress(Exception):
+        VARIABLES.buffer_max_time = int(get_replay_buffer_max_time() or 0)
+    VARIABLES.save_key_presses.clear()
     VARIABLES.clip_exe_history = deque([], maxlen=get_replay_buffer_max_time())
     VARIABLES.clip_exe_counts = {}
     VARIABLES.cached_active_window_pid = None
@@ -3145,6 +3217,13 @@ def on_buffer_recording_started_callback(event):
     _print(f"Exe history deque created. Maxlen={VARIABLES.clip_exe_history.maxlen}.")
 
 
+def on_buffer_recording_started_callback(event):
+    if event != obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
+        return
+    reset_buffer_history()
+    sync_key_recorder()
+
+
 def on_buffer_recording_stopped_callback(event):
     """
     Stops recording executables history.
@@ -3153,6 +3232,7 @@ def on_buffer_recording_stopped_callback(event):
         return
 
     VARIABLES.buffer_started_at = None
+    VARIABLES.buffer_active = False
     VARIABLES.clip_exe_history = None  # stops foreground_tick() from filling it
     VARIABLES.clip_exe_counts = {}
     VARIABLES.cached_active_window_pid = None
@@ -3162,6 +3242,7 @@ def on_buffer_recording_stopped_callback(event):
     VARIABLES.save_in_progress = False
     cancel_pending_open_request()
     reset_forced_save_state()
+    sync_key_recorder()
 
 
 def on_buffer_save_callback(event):
@@ -3170,7 +3251,7 @@ def on_buffer_save_callback(event):
 
     _print(f"{'SAVING BUFFER':->50}")
     VARIABLES.save_in_progress = True
-    clip_end = time.time()
+    event_at = time.time()
 
     force_override = VARIABLES.force_override_save
     half_buffer_save = VARIABLES.half_buffer_save
@@ -3189,11 +3270,16 @@ def on_buffer_save_callback(event):
         return
 
     VARIABLES.last_saved_clip_path = path
+    clip_end, anchor = pick_clip_end(event_at, get_file_created_at(path), VARIABLES.save_requested_at,
+                                     list(VARIABLES.save_key_presses))
+    while VARIABLES.save_key_presses and VARIABLES.save_key_presses[0] <= event_at:
+        VARIABLES.save_key_presses.popleft()  # older saves can't claim them
+    _print(f"Clip end taken from: {anchor}")
     replay_output = "obs_frontend_get_replay_buffer_output"
     full_duration = get_replay_clip_duration(clip_end)
     full_metadata = collect_moment_metadata("replay_buffer", clip_end, full_duration, replay_output)
 
-    trimming_started = False
+    short_job = None
     if half_buffer_save:
         short_percent = obs.obs_data_get_int(VARIABLES.script_settings, PN.PROP_SHORT_BUFFER_PERCENT)
         short_percent = min(max(short_percent, 5), 100)
@@ -3202,23 +3288,15 @@ def on_buffer_save_callback(event):
         links_folder = obs.obs_data_get_string(VARIABLES.script_settings, PN.PROP_CLIPS_LINKS_FOLDER_PATH)
         short_metadata = collect_moment_metadata(
             "short_clip", clip_end, min(half_duration, full_duration), replay_output)
-        try:
-            Thread(
-                target=trim_half_clip_async,
-                args=(path, half_duration, links_enabled, links_folder, short_metadata, full_metadata),
-                daemon=True,
-                name=WORKER_THREAD_NAME
-            ).start()
-            trimming_started = True
-        except Exception:
-            _print("Cannot start short-clip trimming thread.")
-            _print(traceback.format_exc())
+        short_job = (path, half_duration, links_enabled, links_folder, short_metadata, full_metadata)
 
     notify(True, path)
-    if not trimming_started:
-        write_moment_metadata(path, full_metadata)
+    # Timer calls come before any thread start: a thread start releases the GIL, and another script
+    # callback may then leave OBS without a current script ("No active script").
     reset_forced_save_state()
-    if not trimming_started:
+    VARIABLES.save_key_vks = read_save_key_vks()  # the binding may have changed since the buffer started
+    if short_job is None or not run_info_writer(trim_half_clip_async, *short_job):
+        write_clip_info_async(path, full_metadata)
         VARIABLES.save_in_progress = False
     _print("-" * 50)
 
@@ -3373,12 +3451,12 @@ def summarize_game(timeline, duration: float, game_scene: str) -> dict:
 
 def build_moment_metadata(*, origin: str, clip_end: float, duration: float, timeline_log, markers,
                           game_scene: str, audio_tracks: list[dict], recording_preset: dict,
-                          obs_version: str) -> dict:
+                          obs_version: str, key_log: dict | None = None) -> dict:
     """Pure `moment.clip/1` payload builder (shared contract with Moment Player)."""
     duration = max(float(duration), 0.0)
     clip_start = clip_end - duration
     timeline = cut_timeline(timeline_log, clip_start, clip_end)
-    return {
+    payload = {
         "schema": CONSTANTS.MOMENT_SCHEMA,
         "origin": origin,
         "saved_at": datetime.fromtimestamp(clip_end).astimezone().isoformat(timespec="seconds"),
@@ -3391,6 +3469,30 @@ def build_moment_metadata(*, origin: str, clip_end: float, duration: float, time
         "obs_version": obs_version,
         "writer": f"Moment Replays {CONSTANTS.VERSION}",
     }
+    inputs = build_clip_inputs(key_log, clip_start, clip_end) if key_log else None
+    if inputs is not None:
+        payload["inputs"] = inputs  # last field of the JSON
+    return payload
+
+
+def build_clip_inputs(key_log: dict, clip_start: float, clip_end: float) -> dict | None:
+    """
+    `inputs` of the clip: per recorded key, [down, up, down, up, ...] in ms from the first frame.
+    Held at the start: the first down is 0. Held at the end: the last up is the clip's length.
+    None when no game was in front during the clip.
+    """
+    if not any(start < clip_end and (end is None or end > clip_start) for start, end in key_log["focus"]):
+        return None
+    length_ms = round((clip_end - clip_start) * 1000)
+    inputs = {}
+    for name in KEY_VKS:
+        times: list[int] = []
+        for down, up in key_log["keys"].get(name, ()):
+            down, up = max(down, clip_start), clip_end if up is None else min(up, clip_end)
+            if up > down:
+                times += [round((down - clip_start) * 1000), min(round((up - clip_start) * 1000), length_ms)]
+        inputs[name] = times
+    return inputs
 
 
 def get_audio_tracks() -> list[dict]:
@@ -3440,6 +3542,67 @@ def get_recording_preset(output_getter_name: str) -> dict:
     finally:
         obs.obs_output_release(output)
     return preset
+
+
+def get_file_created_at(path: Path | str) -> float | None:
+    """Wall time this file was created (NTFS keeps it through a rename), or None."""
+    with suppress(OSError):
+        stat = os.stat(path)
+        return getattr(stat, "st_birthtime", stat.st_ctime)
+    return None
+
+
+def read_save_key_vks() -> tuple[int, ...]:
+    """Virtual keys bound to OBS's own "Save Replay" hotkey (its output hotkey)."""
+    vks = []
+    with suppress(Exception):
+        output = obs.obs_frontend_get_replay_buffer_output()
+        if output is None:
+            return ()
+        try:
+            hotkeys = obs.obs_hotkeys_save_output(output)
+            if hotkeys is None:
+                return ()
+            try:
+                bindings = obs.obs_data_get_array(hotkeys, SAVE_KEY_HOTKEY)
+                for i in range(obs.obs_data_array_count(bindings) if bindings is not None else 0):
+                    binding = obs.obs_data_array_item(bindings, i)
+                    key = obs.obs_key_from_name(obs.obs_data_get_string(binding, "key"))
+                    obs.obs_data_release(binding)
+                    vk = obs.obs_key_to_virtual_key(key)
+                    if vk:
+                        vks.append(vk)
+                if bindings is not None:
+                    obs.obs_data_array_release(bindings)
+            finally:
+                obs.obs_data_release(hotkeys)
+        finally:
+            obs.obs_output_release(output)
+    return tuple(vks)
+
+
+def pick_clip_end(now: float, created_at: float | None, requested_at: float | None, presses) -> tuple[float, str]:
+    """
+    (wall time of the clip's last moment, how it was found). OBS cuts the clip where the save was
+    *requested*; the SAVED event comes later (encoder latency plus the write), and marks anchored to
+    that would be early by as much. In order: a script hotkey's request, OBS's own save key, the new
+    file's creation time, and only then the event time.
+
+    Presses count only within SAVE_KEY_MAX_LEAD_S before the saved file was created. If the key was
+    pressed again while the encoder was catching up, OBS ends the clip at the last press before the
+    file was opened.
+    """
+    if created_at is not None and not now - 60 <= created_at <= now + 1:
+        created_at = None  # a wrong clock or a file from some other time
+    limit = now if created_at is None else created_at
+    if requested_at is not None and limit - 30 <= requested_at <= limit + 0.1:
+        return requested_at, "script hotkey"
+    recent = [p for p in presses if limit - CONSTANTS.SAVE_KEY_MAX_LEAD_S <= p <= limit]
+    if recent:
+        return max(recent), "OBS save key"
+    if created_at is not None:
+        return created_at - CONSTANTS.CLIP_CREATED_LAG_S, "file creation time"
+    return now, "save event"
 
 
 def get_replay_clip_duration(clip_end: float) -> float:
@@ -3497,6 +3660,128 @@ def read_mp4_duration(path: Path | str) -> float | None:
         return None
 
 
+# Clip info (moment.clip/1 JSON) inside the MP4: its standard `synopsis` tag,
+# moov/udta/meta/ilst/ldes/data, UTF-8. ffmpeg keeps it through cuts and re-encodes; Explorer
+# doesn't show it. A complete new moov is appended and the old one is retired afterwards by its
+# 4-byte type, so the media never moves and an interrupted write leaves a clip that still plays.
+MP4_META_HDLR = struct.pack(">I4s", 33, b"hdlr") + b"\0" * 8 + b"mdirappl" + b"\0" * 9
+
+
+def _mp4_box(kind: bytes, body: bytes) -> bytes:
+    return struct.pack(">I4s", len(body) + 8, kind) + body
+
+
+def _mp4_top_boxes(f, end: int) -> list[tuple[bytes, int, int, int]]:
+    """(kind, start, size, header size) of every top-level box; ValueError unless they fill the file exactly."""
+    out, pos = [], 0
+    while pos < end:
+        f.seek(pos)
+        head = f.read(16)
+        if len(head) < 8:
+            raise ValueError("truncated box")
+        size, kind = struct.unpack(">I4s", head[:8])
+        header = 8
+        if size == 1 and len(head) == 16:
+            size, header = struct.unpack(">Q", head[8:])[0], 16
+        if size < header or pos + size > end:  # includes size 0 ("to the end"): nothing may follow it
+            raise ValueError(f"open-ended or truncated box {kind!r}")
+        out.append((kind, pos, size, header))
+        pos += size
+    return out
+
+
+def _mp4_children(data: bytes) -> list[tuple[bytes, bytes]]:
+    """(kind, whole box) of every child box; ValueError unless they fill data exactly."""
+    out, pos = [], 0
+    while pos < len(data):
+        if pos + 8 > len(data):
+            raise ValueError("truncated child box")
+        size, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        if size < 8 or pos + size > len(data):
+            raise ValueError(f"bad child box {kind!r}")
+        out.append((kind, data[pos:pos + size]))
+        pos += size
+    return out
+
+
+def _mp4_put(body: bytes, path: tuple[bytes, ...], leaf: bytes) -> bytes:
+    """body with `leaf` at the end of the nested box `path`, replacing the same kind of leaf; parents are created."""
+    kids = _mp4_children(body)
+    if not path:
+        return b"".join(box for kind, box in kids if kind != leaf[4:8]) + leaf
+    kind = path[0]
+    at = next((i for i, (k, _) in enumerate(kids) if k == kind), None)
+    if at is None:
+        at = len(kids)
+        kids.append((kind, _mp4_box(kind, b"\0" * 4 + MP4_META_HDLR if kind == b"meta" else b"")))
+    box = kids[at][1]
+    head = 8
+    if kind == b"meta":  # a full box: 4 bytes of version and flags before its children
+        head = 12
+        if box[16:20] != b"hdlr":
+            raise ValueError("unexpected meta box")
+    kids[at] = (kind, _mp4_box(kind, box[8:head] + _mp4_put(box[head:], path[1:], leaf)))
+    return b"".join(box for _, box in kids)
+
+
+def _finished_moov(f) -> tuple[int, int]:
+    """(start, size) of the only moov of a finished, unfragmented MP4; ValueError otherwise."""
+    boxes = _mp4_top_boxes(f, os.fstat(f.fileno()).st_size)
+    kinds = [box[0] for box in boxes]
+    moov = [box for box in boxes if box[0] == b"moov"]
+    # OBS writes a recording as fragments and turns it into a plain MP4 at the end: `moof` also means "not ready".
+    if kinds[:1] != [b"ftyp"] or len(moov) != 1 or b"mdat" not in kinds or b"moof" in kinds or moov[0][3] != 8:
+        raise ValueError("not a finished plain MP4")
+    return moov[0][1], moov[0][2]
+
+
+def check_finished_mp4(path: Path | str) -> None:
+    """ValueError unless the file is a finished plain MP4 that can take the clip info."""
+    with open(path, "rb") as f:
+        _finished_moov(f)
+
+
+def embed_clip_info(path: Path | str, info: bytes) -> None:
+    """
+    Stores `info` in the MP4's synopsis tag. ValueError: not a finished plain MP4. OSError: locked,
+    full disk... On any error the clip is left as it was.
+    """
+    stat = os.stat(path)
+    with open(path, "r+b", buffering=0) as f:  # unbuffered: a failed write leaves nothing pending
+        start, size = _finished_moov(f)
+        f.seek(start)
+        moov = b""
+        while len(moov) < size:
+            chunk = f.read(size - len(moov))
+            if not chunk:
+                raise ValueError("truncated moov")
+            moov += chunk
+        leaf = _mp4_box(b"ldes", _mp4_box(b"data", struct.pack(">II", 1, 0) + info))
+        new_moov = _mp4_box(b"moov", _mp4_put(moov[8:], (b"udta", b"meta", b"ilst"), leaf))
+        end = f.seek(0, os.SEEK_END)
+        try:
+            rest = memoryview(new_moov)
+            while rest:
+                written = f.write(rest)
+                if not written:
+                    raise OSError("short write")
+                rest = rest[written:]
+            os.fsync(f.fileno())  # the new index must be on disk before the old one is retired
+        except BaseException:
+            f.truncate(end)
+            raise
+        f.seek(start + 4)
+        f.write(b"free")
+    with suppress(OSError):
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+
+def encode_clip_info(payload: dict) -> bytes:
+    """Compact JSON plus spaces, so an editor can rewrite it in place at the same length."""
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return text.encode("utf-8") + b" " * CONSTANTS.INFO_TAG_PADDING
+
+
 def collect_moment_metadata(origin: str, clip_end: float, duration: float, output_getter_name: str) -> dict | None:
     """
     Snapshot of everything the .moment.json needs, i.e. the build_moment_metadata() arguments
@@ -3522,6 +3807,7 @@ def collect_moment_metadata(origin: str, clip_end: float, duration: float, outpu
             "audio_tracks": audio_tracks,
             "recording_preset": preset,
             "obs_version": CONSTANTS.OBS_VERSION_STRING,
+            "key_log": VARIABLES.key_recorder.snapshot() if VARIABLES.record_inputs and VARIABLES.key_recorder else None,
         }
     except Exception:
         _print("Cannot collect moment metadata; the clip itself is saved.")
@@ -3534,24 +3820,90 @@ def moment_metadata_path(clip_path: Path | str) -> Path:
     return clip_path.with_name(clip_path.stem + CONSTANTS.MOMENT_METADATA_SUFFIX)
 
 
-def write_moment_metadata(clip_path: Path | str | None, inputs: dict | None) -> None:
+def build_clip_payload(clip_path: Path, inputs: dict) -> dict:
     """
-    Builds <clip basename>.moment.json from collect_moment_metadata() inputs and writes it next
-    to the final clip, atomically. Uses the file's real length: the replay buffer starts a clip on
-    a keyframe, so a "35 s" clip is often 1-4 s shorter, and every `t` must count from its real
-    first frame (the clip end, the save moment, is the fixed point). Never raises.
+    Payload for a saved file, using its real length: the replay buffer starts a clip on a keyframe,
+    so a "35 s" clip is often 1-4 s shorter, and every `t` must count from its real first frame.
+    """
+    return build_moment_metadata(**{**inputs, "duration": read_mp4_duration(clip_path) or inputs["duration"]})
+
+
+def store_in_mp4(clip_path: Path, inputs: dict, retry_s: float) -> bool:
+    """
+    Stores the clip info inside the MP4, retrying for up to retry_s while OBS is still finishing the
+    file (a recording is fragments until then) or a scanner holds it. False = use the sidecar.
+    """
+    deadline = time.monotonic() + retry_s
+    while True:
+        try:
+            check_finished_mp4(clip_path)
+            embed_clip_info(clip_path, encode_clip_info(build_clip_payload(clip_path, inputs)))
+            _print(f"Clip info saved inside {clip_path.name}")
+            return True
+        except FileNotFoundError:
+            _print("The clip is gone; its info was not written.")
+            return True
+        except (ValueError, PermissionError) as error:
+            reason = str(error)
+        except OSError as error:
+            _print(f"Cannot store the clip info inside the clip: {error}")
+            return False
+        if VARIABLES.unloading.is_set() or time.monotonic() >= deadline:
+            _print(f"The clip info cannot be stored inside the clip ({reason}).")
+            return False
+        VARIABLES.unloading.wait(CONSTANTS.INFO_RETRY_INTERVAL_S)
+
+
+def write_moment_metadata(clip_path: Path | str | None, inputs: dict | None, retry_s: float | None = None) -> None:
+    """
+    Stores the clip info (built from collect_moment_metadata() inputs) inside a finished plain MP4,
+    or else in <clip basename>.moment.json next to it. Worker thread: retries for up to retry_s.
+    Never raises.
     """
     if inputs is None or not clip_path:
         return
+    clip_path = Path(clip_path)
     try:
-        real_duration = read_mp4_duration(clip_path)
-        payload = build_moment_metadata(**{**inputs, "duration": real_duration or inputs["duration"]})
+        retry_s = CONSTANTS.INFO_RETRY_S if retry_s is None else retry_s
+        if clip_path.suffix.lower() == ".mp4" and store_in_mp4(clip_path, inputs, retry_s):
+            return
+        if not clip_path.exists():
+            _print("The clip is gone; its info was not written.")
+            return
         path = moment_metadata_path(clip_path)
-        write_json_atomic(path, payload)
+        write_json_atomic(path, build_clip_payload(clip_path, inputs))
         _print(f"Moment metadata saved at {path}")
     except Exception:
         _print("Cannot write moment metadata; the clip itself is saved.")
         _print(traceback.format_exc())
+
+
+def run_info_writer(target, *args) -> bool:
+    """Runs `target` on a worker thread that is_save_in_progress() and script_unload() know about."""
+    def worker():
+        try:
+            target(*args)
+        finally:
+            VARIABLES.pending_info_writes.discard(current_thread())
+
+    thread = Thread(target=worker, daemon=True, name=WORKER_THREAD_NAME)
+    VARIABLES.pending_info_writes.add(thread)
+    try:
+        thread.start()
+        return True
+    except Exception:
+        VARIABLES.pending_info_writes.discard(thread)
+        _print("Cannot start a worker thread for the clip info.")
+        _print(traceback.format_exc())
+        return False
+
+
+def write_clip_info_async(clip_path: Path | str, inputs: dict | None) -> None:
+    """write_moment_metadata() on a worker; without a thread, one attempt here and no retries."""
+    if inputs is None:
+        return
+    if not run_info_writer(write_moment_metadata, clip_path, inputs):
+        write_moment_metadata(clip_path, inputs, 0)
 
 
 def mark_moment():
@@ -3902,8 +4254,15 @@ if IS_WINDOWS:
     _win_user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
     _win_user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
     _win_user32.GetWindowLongW.restype = wintypes.LONG
+    _win_user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    _win_user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    # PyDLL keeps the GIL: the key thread makes ~30 of these sub-microsecond calls per poll.
+    _get_async_key_state = ctypes.PyDLL("user32").GetAsyncKeyState
+    _get_async_key_state.argtypes = (ctypes.c_int,)
+    _get_async_key_state.restype = ctypes.c_short
 else:
     _win_user32 = None
+    _get_async_key_state = None
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -4029,9 +4388,9 @@ def request_other_obs_scan(now: float) -> None:
 _OBS_NATIVE = None  # (libobs, frontend) ctypes handles, loaded on first scene switch
 
 
-def get_foreground_window_geometry():
-    """(window_rect, monitor_rect, class_name, style) of the foreground window, or None."""
-    hwnd = _win_user32.GetForegroundWindow()
+def get_foreground_window_geometry(hwnd=None):
+    """(window_rect, monitor_rect, class_name, style) of the foreground window (or `hwnd`), or None."""
+    hwnd = hwnd or _win_user32.GetForegroundWindow()
     if not hwnd:
         return None
     rect = wintypes.RECT()
@@ -4368,6 +4727,246 @@ def on_scene_collection_event_callback(event):
         VARIABLES.auto_scene_blocked = False
 
 
+# -------------------- key_recorder.py --------------------
+KEY_VKS = {  # the fixed, ordered set of recorded keys (contract: CLIP_INFO.md section 6)
+    **{str(n): 0x30 + n for n in range(1, 6)},
+    **{letter: ord(letter) for letter in "QWERTASDFGZXCV"},
+    "SHIFT": 0x10, "CTRL": 0x11, "ALT": 0x12, "SPACE": 0x20, "TAB": 0x09,
+    "LMB": 0x01, "RMB": 0x02, "MMB": 0x04, "MB4": 0x05, "MB5": 0x06,
+}
+# Never a game even when fullscreen, whatever the user's Other list says (exe stems, casefolded):
+# typing happens there, so it must not be recorded.
+KEY_NEVER_APPS = frozenset((
+    "chrome", "msedge", "firefox", "opera", "opera_gx", "brave", "vivaldi", "arc", "browser", "chromium",
+    "waterfox", "librewolf", "zen", "iexplore", "discord", "discordptb", "discordcanary", "telegram", "signal",
+    "whatsapp", "slack", "zoom", "skype", "teams", "ms-teams", "vlc", "mpv", "mpc-hc", "mpc-hc64", "mpc-be64",
+    "potplayermini64", "potplayermini", "kmplayer", "smplayer", "wmplayer", "momentplayer", "moment player",
+    "windowsterminal", "wt", "cmd", "powershell", "pwsh", "conhost", "alacritty", "wezterm-gui", "mintty",
+    "code", "cursor", "explorer", "obs64", "obs",
+))
+SAVE_KEY_HOTKEY = "ReplayBuffer.Save"
+
+
+class GameInFront:
+    """
+    True while the window in front is the game: OBS's fullscreen-game rule, or the exe the game
+    capture has hooked. Any doubt counts as no: no foreground window, our own OBS, an unreadable
+    process, an app in the Other list or in KEY_NEVER_APPS.
+    """
+
+    def __init__(self):
+        self._window = None  # (hwnd, pid) the cached names belong to
+        self._exe = self._app = ""
+
+    def __call__(self) -> bool:
+        hwnd = _win_user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD()
+        _win_user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value or pid.value == os.getpid():
+            return False
+        if self._window != (hwnd, pid.value):
+            path = get_process_image_path(pid.value)
+            self._exe = exe_basename(path)
+            self._app = app_display_name(path) if path else ""
+            self._window = (hwnd, pid.value)
+        if not self._exe:
+            return False
+        stem = normalize_rule_name(Path(self._exe).stem)
+        if stem in KEY_NEVER_APPS or {stem, normalize_rule_name(self._app)} & VARIABLES.other_names:
+            return False
+
+        geometry = get_foreground_window_geometry(hwnd)
+        if geometry is None:
+            return False
+        window_rect, monitor_rect, class_name, style = geometry
+        if is_fullscreen_game_window(window_rect, monitor_rect, class_name, style, self._exe, self._app,
+                                     VARIABLES.other_names):
+            return True
+        machine = VARIABLES.auto_scene_machine
+        hooked = machine.hooked_exe if machine is not None else None
+        return (hooked not in (None, HOOKED_EXE_UNKNOWN) and hooked == self._exe and
+                class_name.casefold() not in SHELL_WINDOW_CLASSES)
+
+
+class KeyRecorder:
+    """
+    Press times of the keys in KEY_VKS, recorded only while `game_in_front()` says the game is in
+    front, plus the last presses of OBS's own save key (to anchor a replay's end).
+
+    One thread polls GetAsyncKeyState about 100 times a second; nothing here hooks anything or runs
+    in the game's process. Key times stay in memory (for the length of the buffer/recording) and leave
+    it only inside a clip the user saves; they are never logged. No obspython calls: worker thread.
+    """
+
+    def __init__(self, game_in_front, key_state):
+        self._game_in_front = game_in_front
+        self._key_state = key_state
+        self._lock = Lock()
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self._polls = 0
+        self._last_poll = 0.0
+        self._game = False
+        self._open: dict[str, float] = {}  # keys held now: press time
+        self._closed: dict[str, deque] = {name: deque(maxlen=CONSTANTS.KEY_LOG_MAXLEN) for name in KEY_VKS}
+        self._focus: deque = deque(maxlen=CONSTANTS.KEY_LOG_MAXLEN)  # [start, end or None] while the game was in front
+        self._save_vks: tuple[int, ...] = ()
+        self._save_down: set[int] = set()
+        self._error_logged = False
+
+    # --- thread ---
+    def start(self) -> None:
+        self._thread = Thread(target=self._run, daemon=True, name=WORKER_THREAD_NAME)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        due = time.perf_counter()
+        while not self._stop.is_set():
+            try:
+                self.poll(time.time())
+            except Exception:
+                with suppress(Exception):
+                    with self._lock:
+                        self._release(time.time())
+                if not self._error_logged:
+                    self._error_logged = True
+                    _print("Key recording: a poll failed; recording continues.")
+                    _print(traceback.format_exc())
+            due = max(due + CONSTANTS.KEY_POLL_S, time.perf_counter())
+            self._stop.wait(max(due - time.perf_counter(), 0.001))
+
+    # --- polling ---
+    def poll(self, now: float) -> None:
+        cache: dict[int, int] = {}
+
+        def read(vk: int) -> int:  # one GetAsyncKeyState call per key per poll: it clears the low bit
+            if vk not in cache:
+                cache[vk] = self._key_state(vk)
+            return cache[vk]
+
+        self._poll_save_keys(now, read)
+        if not VARIABLES.record_inputs:
+            self._forget()
+            return
+        try:
+            game = bool(self._game_in_front())
+        except Exception:
+            game = False  # any doubt: record nothing
+        with self._lock:
+            self._poll_keys(now, game, read)
+            self._polls += 1
+            if self._polls % 100 == 0:
+                self._trim(now)
+
+    def _poll_save_keys(self, now: float, read) -> None:
+        vks = VARIABLES.save_key_vks
+        if vks != self._save_vks:  # first poll or changed binding: the low bits are stale
+            self._save_vks = vks
+            self._save_down = {vk for vk in vks if read(vk) & 0x8000}
+            return
+        for vk in vks:
+            state = read(vk)
+            if state & 0x8000:
+                if vk not in self._save_down:
+                    self._save_down.add(vk)
+                    VARIABLES.save_key_presses.append(now)
+            elif vk in self._save_down:
+                self._save_down.discard(vk)
+            elif state & 1:  # pressed and released between two polls
+                VARIABLES.save_key_presses.append(now)
+
+    def _poll_keys(self, now: float, game: bool, read) -> None:
+        if not game:
+            self._release(now)
+            return
+        prime = not self._game  # just came to the front: presses before this moment don't count
+        if prime:
+            self._game = True
+            self._focus.append([now, None])
+        for name, vk in KEY_VKS.items():
+            state = read(vk)
+            if state & 0x8000:
+                self._open.setdefault(name, now)
+            elif name in self._open:
+                self._closed[name].append((self._open.pop(name), now))
+            elif state & 1 and not prime:  # pressed and released between two polls
+                self._closed[name].append((max(self._last_poll, now - 2 * CONSTANTS.KEY_POLL_S), now))
+        self._last_poll = now
+
+    def _release(self, now: float) -> None:
+        """The game is not in front: every key counts as released."""
+        if not self._game:
+            return
+        self._game = False
+        self._focus[-1][1] = now
+        for name, down in self._open.items():
+            self._closed[name].append((down, now))
+        self._open.clear()
+
+    def _forget(self) -> None:
+        """Recording is off: drop everything (save-key presses stay, they aren't game input)."""
+        if not (self._focus or self._open):
+            return
+        with self._lock:
+            self._game = False
+            self._open.clear()
+            self._focus.clear()
+            for closed in self._closed.values():
+                closed.clear()
+
+    # --- memory ---
+    def _keep_since(self, now: float) -> float:
+        keep = now - (VARIABLES.buffer_max_time + 10 if VARIABLES.buffer_active else 0)
+        if VARIABLES.recording_active and VARIABLES.recording_started_at is not None:
+            keep = min(keep, VARIABLES.recording_started_at - 1)
+        return keep
+
+    def _trim(self, now: float) -> None:
+        keep = self._keep_since(now)
+        for closed in self._closed.values():
+            while closed and closed[0][1] < keep:
+                closed.popleft()
+        while self._focus and self._focus[0][1] is not None and self._focus[0][1] < keep:
+            self._focus.popleft()
+
+    def snapshot(self) -> dict:
+        """{"focus": [(start, end or None)], "keys": {name: [(down, up or None)]}} in wall-clock times."""
+        with self._lock:
+            keys = {name: list(closed) for name, closed in self._closed.items()}
+            for name, down in self._open.items():
+                keys[name].append((down, None))
+            return {"focus": [tuple(span) for span in self._focus], "keys": keys}
+
+
+def sync_key_recorder() -> None:
+    """
+    Starts or stops the key thread. Call it last in a script callback: it may start or join a
+    thread (that releases the GIL) and obspython registrations must not come after that.
+    """
+    wanted = IS_WINDOWS and (VARIABLES.buffer_active or (VARIABLES.recording_active and VARIABLES.record_inputs))
+    recorder = VARIABLES.key_recorder
+    try:
+        if wanted and recorder is None:
+            VARIABLES.save_key_vks = read_save_key_vks()
+            recorder = KeyRecorder(GameInFront(), _get_async_key_state)
+            VARIABLES.key_recorder = recorder
+            recorder.start()
+        elif not wanted and recorder is not None:
+            VARIABLES.key_recorder = None
+            recorder.stop()
+    except Exception:
+        VARIABLES.key_recorder = None
+        _print("Key recording: cannot start or stop the key thread.")
+        _print(traceback.format_exc())
+
+
 # -------------------- hotkeys.py --------------------
 def build_default_hotkey_data(key_name: str, *, alt: bool = False, shift: bool = False,
                               control: bool = False, command: bool = False):
@@ -4463,6 +5062,7 @@ def unregister_frontend_event_callbacks() -> None:
 
     for callback in (
         on_recording_started_callback,
+        on_recording_stopping_callback,
         on_recording_stopped_callback,
         on_buffer_save_callback,
         on_buffer_recording_started_callback,
@@ -4476,6 +5076,7 @@ def unregister_frontend_event_callbacks() -> None:
 def register_frontend_event_callbacks() -> None:
     unregister_frontend_event_callbacks()
     obs.obs_frontend_add_event_callback(on_recording_started_callback)
+    obs.obs_frontend_add_event_callback(on_recording_stopping_callback)
     obs.obs_frontend_add_event_callback(on_recording_stopped_callback)
     obs.obs_frontend_add_event_callback(on_buffer_save_callback)
     obs.obs_frontend_add_event_callback(on_buffer_recording_started_callback)
@@ -4819,7 +5420,9 @@ def script_update(settings):
     if not obs.obs_data_get_bool(settings, PN.PROP_AUTO_SCENE_ENABLED):
         auto_scene_detach()  # balance inc_showing right away; foreground_tick re-attaches when re-enabled
     VARIABLES.sidecar_persist_enabled = True
+    VARIABLES.record_inputs = obs.obs_data_get_bool(settings, PN.PROP_RECORD_INPUTS)
     _print("Script updated")
+    sync_key_recorder()
 
 
 def script_save(settings):
@@ -4850,6 +5453,9 @@ def script_load(script_settings):
     VARIABLES.saved_recording_path = None
     VARIABLES.auto_scene_blocked = False
     VARIABLES.auto_scene_status = ""
+    VARIABLES.unloading.clear()
+    VARIABLES.record_inputs = obs.obs_data_get_bool(script_settings, PN.PROP_RECORD_INPUTS)
+    VARIABLES.recording_active = bool(obs.obs_frontend_recording_active())
     json_settings = json.loads(obs.obs_data_get_json(script_settings))
     try:
         load_aliases(json_settings)
@@ -4863,7 +5469,7 @@ def script_load(script_settings):
     load_hotkeys()
 
     if obs.obs_frontend_replay_buffer_active():
-        on_buffer_recording_started_callback(obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED)
+        reset_buffer_history()
         VARIABLES.buffer_started_at = None  # started before this load: assume a full buffer
     # A recording already running has an unknown start, so it gets no .moment.json.
     VARIABLES.recording_started_at = None
@@ -4871,11 +5477,13 @@ def script_load(script_settings):
 
     VARIABLES.sidecar_persist_enabled = True
     start_update_check_thread()
+    sync_key_recorder()
     _print("Script loaded.")
 
 
 def script_unload():
     VARIABLES.sidecar_persist_enabled = False
+    VARIABLES.unloading.set()  # clip info still waiting for a file stops retrying and uses the sidecar
     unregister_frontend_event_callbacks()
     if VARIABLES.script_settings is not None:
         save_persisted_settings_from_obs_data(VARIABLES.script_settings, allow_when_disabled=True)
@@ -4905,6 +5513,15 @@ def script_unload():
     cancel_alt_recording_watchdog()
     VARIABLES.alt_recording_pending = False
     reset_forced_save_state()
+
+    # Joins release the GIL, so nothing that needs obspython comes after this point.
+    recorder, VARIABLES.key_recorder = VARIABLES.key_recorder, None
+    if recorder is not None:
+        recorder.stop()
+    VARIABLES.buffer_active = VARIABLES.recording_active = False
+    deadline = time.monotonic() + 3
+    for thread in list(VARIABLES.pending_info_writes):
+        thread.join(max(deadline - time.monotonic(), 0))
 
     flush_deferred_logs()
     _print("Script unloaded.")

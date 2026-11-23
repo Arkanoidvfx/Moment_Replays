@@ -27,9 +27,12 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
 - **Auto scene (Game / Desktop)** — optional: switches to a `Game` scene once a
   `Game Capture` source has hooked your fullscreen game, and back to `Desktop`
   when you leave it. Off unless enabled and both scenes and the source exist.
-- **Moment metadata** — a `<clip>.moment.json` next to each clip/recording with
-  the game, an app/scene timeline, your markers, audio tracks and encoder settings
-  (read by Moment Player).
+- **Clip info** — the game, an app/scene timeline, your markers, audio tracks and
+  encoder settings, stored inside each MP4 clip/recording for Moment Player (or in a
+  `<clip>.moment.json` next to it when that isn't possible).
+- **Key presses (opt-in)** — records when you press a fixed set of game keys and
+  mouse buttons while your game is in front, so Moment Player can show them over the
+  clip. Off by default; see below.
 - **Mark moment** — a hotkey that marks the current moment; the next saved clip
   carries it as an annotation.
 - **Bilingual UI** — English / Russian, switchable in the script settings.
@@ -64,7 +67,7 @@ It also registers five extra actions, bindable under **Settings → Hotkeys**:
 - **Start/stop recording (alternative folder)** — records a full OBS recording into the
   configured *Recording folder* instead of the OBS default path.
 - **Mark moment** — marks "this was cool" while you play; the next saved clip
-  that contains the moment lists it in its `.moment.json`.
+  that contains the moment lists it in its clip info.
 
 Defaults (applied only if the action was never bound): `Ctrl+F10` short clip,
 `Alt+F10` alternative folder, `Ctrl+Alt+F10` open last video, `F8` mark moment.
@@ -82,7 +85,8 @@ your normal record key). Change them freely in OBS hotkey settings.
 - **Moments** — *Auto-switch Game / Desktop scenes* (needs scenes `Game` and
   `Desktop` and a game capture source `Game Capture` in *any fullscreen* mode;
   other names can be set in `Moment_Replays.settings.json` via `auto_scene_game`,
-  `auto_scene_desktop`, `auto_scene_game_source`) and *Save .moment.json next to clips*.
+  `auto_scene_desktop`, `auto_scene_game_source`), *Store clip info inside the clip*
+  and *Record key presses* (off by default).
   Apps listed in the `Other` folder list never count as games. If the game
   capture hooks but stays black for ~2 s, the script falls back to `Desktop`,
   re-hooks once and keeps that game off `Game` for 60 s, so clips never end up
@@ -95,14 +99,21 @@ your normal record key). Change them freely in OBS hotkey settings.
 Bundled sounds are pre-selected for convenience; replace them with your own
 `.wav` files or turn notifications off entirely.
 
-## Clip metadata (`.moment.json`)
+## Clip info (`moment.clip/1`)
 
-Written next to the final clip as `<clip basename>.moment.json` (schema
-`moment.clip/1`). `t` values are seconds from the clip's first frame and
-`duration_s` is the clip's real length, read from the saved MP4 (a replay starts
-on a keyframe, so it is often a few seconds shorter than the buffer setting).
-Markers are accurate to about half a second; the app timeline is sampled once
-per second.
+Stored inside the MP4 itself, as its standard `synopsis` tag (compact JSON followed by
+spaces), so it survives copying, ffmpeg cuts and re-encodes; Explorer does not show it.
+Other containers, and files that aren't a finished plain MP4, get the same JSON as
+`<clip basename>.moment.json` next to the clip instead. If a recording is still being
+finished when OBS reports it stopped, the script waits up to 10 s for it before
+falling back.
+
+`t` values are seconds from the clip's first frame and `duration_s` is the clip's real
+length, read from the saved file (a replay starts on a keyframe, so it is often a few
+seconds shorter than the buffer setting). The end of a clip is the moment its save or
+stop was *requested*: the script takes it from its own hotkey, from OBS's *Save Replay*
+key (the last press before the file was created), or from the new file's creation time;
+for recordings, from the stop event. The app timeline is sampled once per second.
 
 ```json
 {"schema":"moment.clip/1","origin":"replay_buffer","saved_at":"2026-11-19T21:04:05+01:00","duration_s":35.0,
@@ -111,13 +122,33 @@ per second.
  "annotations":[{"type":"marker","t":12.4,"label":"mark"}],
  "audio_tracks":[{"track":1,"name":"Mix"}],
  "recording_preset":{"encoder":"obs_nvenc_h264_tex","rate_control":"CQP","cq":23,"width":1920,"height":1080,"fps":30},
- "obs_version":"33.0.1","writer":"Moment Replays 1.6"}
+ "obs_version":"33.0.1","writer":"Moment Replays 1.7"}
 ```
 
 `origin` is `replay_buffer`, `short_clip`, `recording` or `alt_recording`.
 `recording_preset` fields are `null` when OBS doesn't report them (`cq` is only
 set for CQP/CRF/ICQ rate control). Recordings that were already running when the
-script loaded get no metadata (their start time is unknown).
+script loaded get no clip info (their start time is unknown).
+
+### Key presses (`inputs`)
+
+With *Record key presses* on, the JSON ends with `"inputs"`: for each recorded key, its
+presses in whole milliseconds from the clip's first frame as `[down, up, down, up, ...]`.
+A key held at the start begins at 0; one held at the end ends at the clip's length. An
+empty list means recorded but not pressed; the field is absent when recording was off or
+no game was in front.
+
+- Recorded: `1 2 3 4 5 Q W E R T A S D F G Z X C V SHIFT CTRL ALT SPACE TAB LMB RMB MMB
+  MB4 MB5`. Not the whole keyboard, on purpose.
+- Only while a replay buffer or recording runs, and only while your game is the window in
+  front: it covers its whole monitor (like auto scene's rule) or is the exe your game
+  capture has hooked. Anything else in front (Discord, a browser, the desktop, OBS)
+  records nothing and counts as all keys released.
+- The script only reads key states (about 100 times a second); it hooks nothing and
+  touches no other process. Presses stay in memory until a clip is saved, then travel
+  inside that clip. They are never logged.
+- Limits: text typed in a game's own chat uses some of these keys; a game running as
+  administrator hides its keys from OBS; the mouse wheel isn't recorded.
 
 See [CHANGELOG.md](CHANGELOG.md) for the version history.
 
@@ -134,7 +165,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the version history.
 сцены. Правила имён по пути/`.exe`, папка `Other`, звуковые уведомления,
 короткие клипы (последние N% буфера через ffmpeg), hard links, интерфейс EN/RU
 и проверка обновлений. Звуки идут в комплекте — их можно заменить или отключить.
-С 1.6: автопереключение сцен Game/Desktop (по умолчанию выключено), файл
-`.moment.json` рядом с каждым клипом для Moment Player и хоткей «Отметить
-момент» (`F8`).
+С 1.6: автопереключение сцен Game/Desktop (по умолчанию выключено) и хоткей
+«Отметить момент» (`F8`). С 1.7: данные о клипе хранятся внутри самого MP4
+(иначе — `.moment.json` рядом), точное время меток и клипов, запись нажатий клавиш
+(по умолчанию выключено).
 Для коротких клипов нужен `ffmpeg` в `PATH`.
