@@ -144,7 +144,7 @@ no game was in front.
   front: it covers its whole monitor (like auto scene's rule) or is the exe your game
   capture has hooked. Anything else in front (Discord, a browser, the desktop, OBS)
   records nothing and counts as all keys released.
-- The script only reads key states (about 100 times a second); it hooks nothing and
+- The script only reads key states (about 250 times a second); it hooks nothing and
   touches no other process. Presses stay in memory until a clip is saved, then travel
   inside that clip. They are never logged.
 - Limits: text typed in a game's own chat uses some of these keys; a game running as

@@ -81,7 +81,7 @@ class CONSTANTS:
     CLIP_CREATED_LAG_S = 0.25       # replay file created minus clip end, until a key save shows the real value
     SAVE_KEY_MAX_LEAD_S = 5.0       # a save-key press older than this did not cause the file (x264: 1.2 s, AMF: 1.8 s)
     CREATED_MAX_AGE_S = 600.0       # writing a big buffer to a slow disk takes a while; older is not this file
-    KEY_POLL_S = 0.01
+    KEY_POLL_S = 0.004              # 250 Hz: 1 to 3 % of one core while a game is in front (measured)
     KEY_LOG_MAXLEN = 100_000        # press intervals per key
     FILENAME_PROHIBITED_CHARS = r'/\:"<>*?|%'
     PATH_PROHIBITED_CHARS = r'"<>*?|%'
@@ -4829,7 +4829,7 @@ class KeyRecorder:
     front, plus the last presses of OBS's own save key (to anchor a replay's end; Shift, Ctrl, Alt
     and Win are looked at only while that key is down).
 
-    One thread polls GetAsyncKeyState about 100 times a second; nothing here hooks anything or runs
+    One thread polls GetAsyncKeyState about 250 times a second; nothing here hooks anything or runs
     in the game's process. Key times stay in memory (for the length of the buffer/recording) and leave
     it only inside a clip the user saves; they are never logged. No obspython calls: worker thread.
     """
@@ -4905,7 +4905,7 @@ class KeyRecorder:
         with self._lock:
             self._poll_keys(now, game, read)
             self._polls += 1
-            if self._polls % 100 == 0:
+            if self._polls % 250 == 0:  # about once a second
                 self._trim(now)
 
     def _poll_save_keys(self, now: float, read) -> None:
