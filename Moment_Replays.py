@@ -14,6 +14,7 @@
 
 import sys
 import ctypes
+import hashlib
 import re
 import json
 import traceback
@@ -23,8 +24,11 @@ import webbrowser
 import os
 import struct
 import subprocess
+import tempfile
 import time
+import wave
 import winsound
+from array import array
 from enum import Enum
 from threading import Event
 from threading import Lock
@@ -208,6 +212,7 @@ class VARIABLES:
     update_status_key = "update_status_initial"
     update_status_args = {"version": CONSTANTS.VERSION}
     interface_language_refreshing = False
+    sound_dir: tempfile.TemporaryDirectory | None = None  # quieter copies of the sounds, see scaled_sound_path
 
 
 class ConfigTypes(Enum):
@@ -274,6 +279,8 @@ class PropertiesNames:
     PROP_NOTIFY_RECORDING_ON_START_PATH = "notify_recording_on_start_path"
     PROP_NOTIFY_RECORDING_ON_STOP = "notify_recording_on_stop"
     PROP_NOTIFY_RECORDING_ON_STOP_PATH = "notify_recording_on_stop_path"
+    PROP_SOUND_VOLUME = "sound_volume"
+    BTN_TEST_SOUND = "test_sound_btn"
 
     # Aliases settings
     PROP_ALIASES_LIST = "aliases_list"
@@ -365,6 +372,7 @@ PERSISTED_BOOL_DEFAULTS = {
 PERSISTED_INT_DEFAULTS = {
     PN.PROP_CLIPS_NAMING_MODE: ClipNamingModes.MOST_RECORDED_PROCESS.value,
     PN.PROP_SHORT_BUFFER_PERCENT: 40,
+    PN.PROP_SOUND_VOLUME: 100,
 }
 
 PERSISTED_LIST_DEFAULTS = {
@@ -379,6 +387,13 @@ DEFAULT_SOUND_PATHS = {
     PN.PROP_NOTIFY_RECORDING_ON_START_PATH: str(CONSTANTS.DEFAULT_RECORDING_START_SOUND_PATH),
     PN.PROP_NOTIFY_RECORDING_ON_STOP_PATH: str(CONSTANTS.DEFAULT_RECORDING_STOP_SOUND_PATH),
 }
+
+NOTIFICATION_SOUNDS = (
+    (PN.PROP_NOTIFY_CLIPS_ON_SUCCESS, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH),
+    (PN.PROP_NOTIFY_CLIPS_ON_FAILURE, PN.PROP_NOTIFY_CLIPS_ON_FAILURE_PATH),
+    (PN.PROP_NOTIFY_RECORDING_ON_START, PN.PROP_NOTIFY_RECORDING_ON_START_PATH),
+    (PN.PROP_NOTIFY_RECORDING_ON_STOP, PN.PROP_NOTIFY_RECORDING_ON_STOP_PATH),
+)
 
 LEGACY_DEFAULT_SOUND_PATHS = {
     PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH: {"", str(CONSTANTS.LEGACY_DEFAULT_SUCCESS_SOUND_PATH)},
@@ -426,6 +441,8 @@ UI_TEXT = {
         "clip_name_current_scene": "Current scene",
         "file_name": "File name",
         "invalid_file_name_format": "<font color=\"red\"><pre> Invalid file name format.</pre></font>",
+        "sound_volume": "Volume",
+        "test_sound": "Play test sound",
         "play_on_success": "Play on success",
         "play_on_success_path": "Success sound",
         "play_on_failure": "Play on failure",
@@ -566,6 +583,8 @@ UI_TEXT = {
         "clip_name_current_scene": "Текущая сцена",
         "file_name": "Имя файла",
         "invalid_file_name_format": "<font color=\"red\"><pre> Неверный формат имени файла.</pre></font>",
+        "sound_volume": "Громкость",
+        "test_sound": "Проверить звук",
         "play_on_success": "Звук при успешном сохранении",
         "play_on_success_path": "Звук успеха",
         "play_on_failure": "Звук при ошибке сохранения",
@@ -1126,6 +1145,8 @@ def refresh_localized_properties(props, data=None) -> None:
         obs.obs_property_set_long_description(filename_prop, variables_tip_ru if get_ui_language(data) == "ru" else variables_tip)
 
     notifications = get_group_content(props, PN.GR_SOUND_NOTIFICATION_SETTINGS)
+    set_property_description(notifications, PN.PROP_SOUND_VOLUME, tr("sound_volume", data=data))
+    set_property_description(notifications, PN.BTN_TEST_SOUND, tr("test_sound", data=data))
     set_property_description(notifications, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS, tr("play_on_success", data=data))
     set_property_description(notifications, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH, tr("play_on_success_path", data=data))
     set_property_description(notifications, PN.PROP_NOTIFY_CLIPS_ON_FAILURE, tr("play_on_failure", data=data))
@@ -1378,6 +1399,17 @@ def setup_clip_naming_settings(group_obj):
 
 
 def setup_notifications_settings(group_obj):
+    add_int_slider = getattr(obs, "obs_properties_add_int_slider", None) or obs.obs_properties_add_int
+    volume_prop = add_int_slider(
+        props=group_obj,
+        name=PN.PROP_SOUND_VOLUME,
+        description=tr("sound_volume"),
+        min=0, max=100,
+        step=5
+    )
+    obs.obs_property_int_set_suffix(volume_prop, " %")
+    obs.obs_properties_add_button(group_obj, PN.BTN_TEST_SOUND, tr("test_sound"), test_sound_callback)
+
     notification_success_prop = obs.obs_properties_add_bool(
         props=group_obj,
         name=PN.PROP_NOTIFY_CLIPS_ON_SUCCESS,
@@ -1442,6 +1474,7 @@ def setup_notifications_settings(group_obj):
                                  obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_NOTIFY_RECORDING_ON_STOP))
 
     # ----- Callbacks ------
+    obs.obs_property_set_modified_callback(volume_prop, persist_settings_callback)
     obs.obs_property_set_modified_callback(notification_success_prop, update_notifications_menu_callback)
     obs.obs_property_set_modified_callback(notification_failure_prop, update_notifications_menu_callback)
     obs.obs_property_set_modified_callback(recording_start_prop, update_notifications_menu_callback)
@@ -2035,6 +2068,14 @@ def update_notifications_menu_callback(p, prop, data):
     return True
 
 
+def test_sound_callback(*args):
+    """Plays the first enabled sound (the "clip saved" one if none is) at the current volume."""
+    settings = VARIABLES.script_settings
+    path_prop = next((path for enabled, path in NOTIFICATION_SOUNDS if obs.obs_data_get_bool(settings, enabled)),
+                     PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH)
+    play_sound(obs.obs_data_get_string(settings, path_prop))
+
+
 def check_base_path_callback(p, prop, data):
     """
     Checks base path is in the same disk as OBS recordings path.
@@ -2255,12 +2296,66 @@ def get_active_executable_path(force_refresh: bool = False) -> Path:
     return VARIABLES.cached_active_exe
 
 
+def scale_wav(source: Path | str, target: Path | str, percent: int) -> None:
+    """Writes a 16-bit copy of a PCM WAV with its volume scaled. Raises for anything it can't read."""
+    with wave.open(str(source), "rb") as wav:
+        if getattr(wav, "getformat", lambda: wave.WAVE_FORMAT_PCM)() not in (wave.WAVE_FORMAT_PCM, 0xFFFE):
+            raise wave.Error("not integer PCM")  # Python 3.15 also opens float WAVs
+        channels, width, rate = wav.getnchannels(), wav.getsampwidth(), wav.getframerate()
+        data = wav.readframes(wav.getnframes())
+
+    if width == 1:  # unsigned
+        samples = array("h", ((value - 128) * 256 for value in data))
+    elif width <= 4:  # the two high bytes of each little-endian sample
+        count = len(data) // width
+        high = bytearray(count * 2)
+        high[0::2] = data[width - 2:count * width:width]
+        high[1::2] = data[width - 1:count * width:width]
+        samples = array("h", bytes(high))
+    else:
+        raise wave.Error(f"{width * 8}-bit WAV")
+
+    scaled = array("h", [value * percent // 100 for value in samples])
+    with wave.open(str(target), "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes(scaled.tobytes())
+
+
+def scaled_sound_path(path: str | Path, percent: int) -> Path:
+    """
+    The quieter copy of a sound, made once per file and volume and deleted on unload. It is a file because
+    winsound can't play from memory asynchronously.
+    """
+    stat = os.stat(path)
+    if VARIABLES.sound_dir is None:
+        VARIABLES.sound_dir = tempfile.TemporaryDirectory(prefix="Moment_Replays_", ignore_cleanup_errors=True)
+    key = f"{os.path.abspath(path)}|{stat.st_mtime_ns}|{stat.st_size}|{percent}"
+    target = Path(VARIABLES.sound_dir.name) / (hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".wav")
+    if not target.exists():
+        partial = target.with_suffix(".part")
+        scale_wav(path, partial, percent)
+        os.replace(partial, target)
+    return target
+
+
 def play_sound(path: str | Path):
     """
-    Plays sound using windows engine.
+    Plays sound using windows engine, at the volume from the settings.
 
     :param path: path to sound (.wav)
     """
+    percent = 100
+    with suppress(Exception):
+        percent = obs.obs_data_get_int(VARIABLES.script_settings, PN.PROP_SOUND_VOLUME)
+    if percent <= 0:
+        return
+    if percent < 100:
+        try:
+            path = scaled_sound_path(path, percent)
+        except Exception as e:
+            _print(f"Cannot change the volume of {path} ({e}); playing it unchanged.")
     with suppress(Exception):
         winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
 
@@ -2641,12 +2736,12 @@ def notify(success: bool, clip_path: Path | None = None, *, play_audio: bool = T
     sound_notifications_enabled = obs.obs_data_get_bool(VARIABLES.script_settings, PN.GR_SOUND_NOTIFICATION_SETTINGS)
 
     if success:
+        if clip_path:
+            _print(f"Clip saved at {clip_path}")
         if (play_audio and sound_notifications_enabled and
                 obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS)):
             path = obs.obs_data_get_string(VARIABLES.script_settings, PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH)
             play_sound(path)
-        if clip_path:
-            _print(f"Clip saved at {clip_path}")
     else:
         if (play_audio and sound_notifications_enabled and
                 obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_NOTIFY_CLIPS_ON_FAILURE)):
@@ -3271,8 +3366,8 @@ def on_buffer_save_callback(event):
     except Exception:
         _print("An error occurred while moving file to the new destination.")
         _print(traceback.format_exc())
+        reset_forced_save_state()  # timer calls come before the sound, which releases the GIL
         notify(False)
-        reset_forced_save_state()
         VARIABLES.save_in_progress = False
         _print("-" * 50)
         return
@@ -3301,11 +3396,11 @@ def on_buffer_save_callback(event):
             "short_clip", clip_end, min(half_duration, full_duration), replay_output)
         short_job = (path, half_duration, links_enabled, links_folder, short_metadata, full_metadata)
 
-    notify(True, path)
-    # Timer calls come before any thread start: a thread start releases the GIL, and another script
+    # Timer calls come before the sound and any thread start: those release the GIL, and another script
     # callback may then leave OBS without a current script ("No active script").
     reset_forced_save_state()
     VARIABLES.save_key_bindings = read_save_key_bindings()  # may have changed since the buffer started
+    notify(True, path)
     if short_job is None or not run_info_writer(trim_half_clip_async, *short_job):
         write_clip_info_async(path, full_metadata)
         VARIABLES.save_in_progress = False
@@ -3956,6 +4051,10 @@ def play_mark_feedback():
 
 def stop_mark_feedback():
     obs.timer_remove(stop_mark_feedback)
+    stop_playing_sound()
+
+
+def stop_playing_sound():
     with suppress(Exception):
         winsound.PlaySound(None, 0)
 
@@ -5565,6 +5664,11 @@ def script_unload():
     if recorder is not None:
         recorder.stop()
     VARIABLES.buffer_active = VARIABLES.recording_active = False
+    sound_dir, VARIABLES.sound_dir = VARIABLES.sound_dir, None
+    if sound_dir is not None:
+        stop_playing_sound()  # its file goes away
+        with suppress(Exception):
+            sound_dir.cleanup()
     deadline = time.monotonic() + 3
     for thread in list(VARIABLES.pending_info_writes):
         thread.join(max(deadline - time.monotonic(), 0))
