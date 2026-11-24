@@ -2,6 +2,18 @@
 
 All notable changes to Moment Replays are documented here.
 
+## Unreleased
+- **Sound volume** — a slider and a test button in *Sounds*. 100 % (the default) plays the
+  files exactly as before.
+- **Clip folders** — the panel starts with the one folder most people need and shows where the
+  next clip will be saved; everything else is behind *More folders* (hidden settings keep
+  working). Folders that are missing, can't be written to or are on the wrong drive get a red
+  line. A folder on the wrong drive is no longer replaced silently: your choice stays, and clips
+  stay in the OBS recording folder until it is fixed. The `Other` list moved here from
+  *Naming rules*.
+- **Folder guide** — [English](FOLDERS.md) and [Russian](FOLDERS.ru.md), with a button in the panel.
+- A links folder that can't be created no longer makes a saved clip count as failed.
+
 ## v1.7
 - **Clip info inside the MP4** — the game, timeline, markers, audio tracks and encoder
   settings (schema `moment.clip/1`) are now stored in the clip itself, in its standard

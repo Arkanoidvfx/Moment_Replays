@@ -15,6 +15,7 @@
 import sys
 import ctypes
 import hashlib
+import html
 import re
 import json
 import traceback
@@ -107,6 +108,10 @@ class CONSTANTS:
     LEGACY_APP_RULES_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.app_rules.json")
     GITHUB_PROJECT_URL = "https://github.com/Arkanoidvfx/Moment_Replays"
     GITHUB_LATEST_RELEASE_URL = f"{GITHUB_PROJECT_URL}/releases/latest"
+    FOLDER_GUIDE_URLS = {
+        "en": f"{GITHUB_PROJECT_URL}/blob/main/FOLDERS.md",
+        "ru": f"{GITHUB_PROJECT_URL}/blob/main/FOLDERS.ru.md",
+    }
     GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/Arkanoidvfx/Moment_Replays/releases/latest"
     UPDATE_CHECK_TIMEOUT = 5
     OTHER_FOLDER_NAME = "Other"
@@ -252,10 +257,15 @@ class PropertiesNames:
 
     # Clips path settings
     PROP_CLIPS_BASE_PATH = "clips_base_path"
-    TXT_CLIPS_BASE_PATH_WARNING = "clips_base_path_warning"
+    TXT_NEXT_CLIP = "next_clip"
+    TXT_FOLDER_PROBLEMS = "folder_problems"
+    BTN_USE_OBS_FOLDER = "use_obs_folder_btn"
+    BTN_CHECK_FOLDERS = "check_folders_btn"
+    BTN_FOLDER_GUIDE = "folder_guide_btn"
+    PROP_SHOW_MORE_FOLDERS = "show_more_folders"
     PROP_SHOW_OVERRIDE_FOLDER_SETTINGS = "show_override_folder_settings"
     PROP_CLIPS_OVERRIDE_PATH = "clips_override_path"
-    TXT_CLIPS_OVERRIDE_PATH_WARNING = "clips_override_path_warning"
+    TXT_CLIPS_OVERRIDE_PATH_DESC = "clips_override_path_desc"
     PROP_RECORDING_FOLDER = "recording_alt_folder"
     TXT_RECORDING_FOLDER_DESC = "recording_alt_folder_desc"
     PROP_SHOW_CLIP_NAMING_SETTINGS = "show_clip_naming_settings"
@@ -266,9 +276,8 @@ class PropertiesNames:
     PROP_CLIPS_SAVE_TO_FOLDER = "clips_save_to_folder"
     TXT_CLIPS_SAVE_TO_FOLDER_DESC = "clips_save_to_folder_desc"
     PROP_CLIPS_CREATE_LINKS = "clips_create_links"
-    TXT_CLIPS_CREATE_LINKS_DESC = "clips_create_links_desc"
     PROP_CLIPS_LINKS_FOLDER_PATH = "clips_links_folder_path"
-    TXT_CLIPS_LINKS_FOLDER_PATH_WARNING = "clips_links_folder_path_warning"
+    TXT_CLIPS_LINKS_FOLDER_PATH_DESC = "clips_links_folder_path_desc"
 
     # Sound notification settings
     PROP_NOTIFY_CLIPS_ON_SUCCESS = "notify_clips_on_success"
@@ -300,7 +309,6 @@ class PropertiesNames:
 
     # App name rules
     TXT_APP_NAME_RULES_DESC = "app_name_rules_desc"
-    TXT_APP_OTHER_NAMES_TITLE = "app_other_names_title"
     PROP_APP_OTHER_NAMES = "app_other_names"
     TXT_APP_OTHER_NAMES_DESC = "app_other_names_desc"
     TXT_APP_OTHER_NAMES_INVALID = "app_other_names_invalid_err"
@@ -361,6 +369,7 @@ PERSISTED_BOOL_DEFAULTS = {
     PN.PROP_NOTIFY_CLIPS_ON_FAILURE: True,
     PN.PROP_NOTIFY_RECORDING_ON_START: False,
     PN.PROP_NOTIFY_RECORDING_ON_STOP: False,
+    PN.PROP_SHOW_MORE_FOLDERS: False,  # only what the panel shows; hidden settings keep working
     PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS: True,
     PN.PROP_SHOW_CLIP_NAMING_SETTINGS: False,
     # Opt-in: only the installer's fresh sidecar turns it on (see load_persisted_settings).
@@ -411,30 +420,49 @@ UI_TEXT = {
         ),
         "interface_language": "Interface language",
         "hotkey_settings_tip": "All hotkeys can be changed in OBS Settings -> Hotkeys.",
-        "group_clip_paths": "Clip paths",
+        "group_clip_paths": "Clip folders",
         "group_clip_naming": "Clip naming",
         "group_sound_notifications": "Sounds",
         "group_app_naming_rules": "Naming rules",
         "group_updates": "Updates",
-        "base_folder": "Base folder",
-        "same_drive_warning": "Use the same drive as the OBS recording path.",
-        "show_override_folder_settings": "Alternative recording modes",
-        "override_folder": "Alternative save folder",
-        "recording_folder": "Recording folder",
+        "base_folder": "Clips folder",
+        "next_clip": "Next clip: <b>{path}</b>",
+        "next_clip_other": "Apps from the \"{other_folder}\" list: <b>{path}</b>",
+        "next_clip_game": "game",
+        "next_clip_scene": "scene",
+        "folders_ok": "All folders checked: no problems.",
+        "folder_not_found": "Not found: <b>{path}</b>. Connect the drive or choose another folder.",
+        "folder_not_writable": "Can't write to <b>{path}</b>. Choose another folder.",
+        "folder_wrong_drive": (
+            "Wrong drive: OBS records to {drive}, so <b>{path}</b> must be on {drive} too. "
+            "Choose a folder on {drive} or change the recording path in OBS."
+        ),
+        "clips_stay_in_obs_folder": "Until then clips stay in the OBS recording folder.",
+        "use_obs_folder": "Use the OBS recording folder",
+        "check_folders": "Check folders",
+        "folder_guide": "Folder guide",
+        "show_more_folders": "More folders",
+        "show_override_folder_settings": "Extra hotkeys: second folder, short clip, separate recordings",
+        "override_folder": "Second clips folder",
+        "override_folder_desc": (
+            "Used by the \"Save buffer (override folder)\" hotkey. "
+            "Same drive as OBS recordings. Empty: the clips folder."
+        ),
+        "recording_folder": "Recordings folder",
         "recording_folder_desc": (
-            "The alternative-record hotkey saves the full OBS recording to this folder "
-            "(any drive). Leave empty to use the OBS recording path."
+            "Used by the \"Start/stop recording (alternative folder)\" hotkey. Any drive. Empty: the clips folder."
         ),
-        "short_clip_duration": "Shortened clip",
+        "short_clip_duration": "Short clip",
         "short_clip_duration_desc": (
-            "The short-clip hotkey keeps the last N% of the replay buffer. Example: 40% of 1 minute = 24 seconds. "
-            "Requires ffmpeg available in PATH."
+            "The \"Save short clip\" hotkey keeps the last part of the replay. "
+            "40% of 1 minute = 24 seconds. Needs ffmpeg in PATH."
         ),
-        "create_hard_links": "Create hard links",
-        "create_hard_links_desc": (
-            "Creates a second file entry for the same video data. Requires the same drive."
+        "create_hard_links": "Also collect all clips in one folder",
+        "links_folder": "Shared folder",
+        "links_folder_desc": (
+            "Every clip saved to the clips folder appears here too and takes no extra space (hard link). "
+            "Same drive as OBS recordings."
         ),
-        "links_folder": "Links folder",
         "clip_name": "Clip name",
         "clip_name_active_app": "Active app at save time",
         "clip_name_most_recorded_app": "App active for most of the replay",
@@ -498,17 +526,13 @@ UI_TEXT = {
             "</div>"
         ),
         "replacement_format_desc": "RawExeName > ClipName",
-        "send_to_other_desc": (
-            "<b>Send to {other_folder}</b><br/>"
-            "Final clip names in this list are saved to the {other_folder} folder."
-        ),
         "other_names_invalid": (
             "<div style=\"font-size: 13px\">"
             "<span style=\"color: red\">Use app names only.</span><br/>"
             "<span style=\"color: orange\">No paths, no separators like <code>&gt; / \\ :</code>.</span>"
             "</div>"
         ),
-        "apps_saved_to_other": "Apps saved to folder {other_folder}",
+        "apps_saved_to_other": "Apps saved to the \"{other_folder}\" folder",
         "other_names_desc": "Exact final clip-name match, case-insensitive. Example: chrome",
         "check_updates": "Check for updates",
         "open_latest_release": "Open latest release",
@@ -558,25 +582,44 @@ UI_TEXT = {
         "group_sound_notifications": "Звуки",
         "group_app_naming_rules": "Правила имен",
         "group_updates": "Обновление",
-        "base_folder": "Основная папка",
-        "same_drive_warning": "Должно быть на том же диске, что и путь записи OBS.",
-        "show_override_folder_settings": "Альтернативные режимы записи",
-        "override_folder": "Папка альтернативного сохранения",
+        "base_folder": "Папка клипов",
+        "next_clip": "Следующий клип: <b>{path}</b>",
+        "next_clip_other": "Приложения из списка «{other_folder}»: <b>{path}</b>",
+        "next_clip_game": "игра",
+        "next_clip_scene": "сцена",
+        "folders_ok": "Все папки проверены, проблем нет.",
+        "folder_not_found": "Не найдено: <b>{path}</b>. Подключите диск или выберите другую папку.",
+        "folder_not_writable": "Нет доступа на запись: <b>{path}</b>. Выберите другую папку.",
+        "folder_wrong_drive": (
+            "Не тот диск: OBS пишет на {drive}, поэтому <b>{path}</b> тоже должна быть на {drive}. "
+            "Выберите папку на {drive} или смените путь записи в OBS."
+        ),
+        "clips_stay_in_obs_folder": "Пока что клипы остаются в папке записи OBS.",
+        "use_obs_folder": "Взять папку записи OBS",
+        "check_folders": "Проверить папки",
+        "folder_guide": "Как настроить папки",
+        "show_more_folders": "Другие папки",
+        "show_override_folder_settings": "Дополнительные хоткеи: вторая папка, короткий клип, отдельные записи",
+        "override_folder": "Вторая папка клипов",
+        "override_folder_desc": (
+            "Для хоткея «Save buffer (override folder)». "
+            "Тот же диск, что и записи OBS. Пусто: папка клипов."
+        ),
         "recording_folder": "Папка записей",
         "recording_folder_desc": (
-            "Хоткей альтернативной записи сохраняет полную запись OBS в эту папку "
-            "(любой диск). Пусто — используется путь записи OBS."
+            "Для хоткея «Start/stop recording (alternative folder)». Любой диск. Пусто: папка клипов."
         ),
-        "short_clip_duration": "Укороченный клип",
+        "short_clip_duration": "Короткий клип",
         "short_clip_duration_desc": (
-            "Хоткей короткого клипа оставляет последние N% replay buffer. Пример: 40% от 1 минуты = 24 секунды. "
-            "Требуется ffmpeg в PATH."
+            "Хоткей «Save short clip» оставляет конец повтора. "
+            "40% от 1 минуты = 24 секунды. Нужен ffmpeg в PATH."
         ),
-        "create_hard_links": "Создавать hard links",
-        "create_hard_links_desc": (
-            "Создает вторую запись файла для тех же видеоданных. Требует тот же диск."
+        "create_hard_links": "Собирать все клипы ещё и в одной папке",
+        "links_folder": "Общая папка",
+        "links_folder_desc": (
+            "Каждый клип из папки клипов появится и здесь, без затрат места (hard link). "
+            "Тот же диск, что и записи OBS."
         ),
-        "links_folder": "Папка ссылок",
         "clip_name": "Имя клипа",
         "clip_name_active_app": "Активное приложение в момент сохранения",
         "clip_name_most_recorded_app": "Приложение, активное большую часть replay",
@@ -640,17 +683,13 @@ UI_TEXT = {
             "</div>"
         ),
         "replacement_format_desc": "RawExeName > ClipName",
-        "send_to_other_desc": (
-            "<b>Отправлять в {other_folder}</b><br/>"
-            "Финальные имена клипов из списка сохраняются в папку {other_folder}."
-        ),
         "other_names_invalid": (
             "<div style=\"font-size: 13px\">"
             "<span style=\"color: red\">Используй только имена приложений.</span><br/>"
             "<span style=\"color: orange\">Без путей и разделителей вроде <code>&gt; / \\ :</code>.</span>"
             "</div>"
         ),
-        "apps_saved_to_other": "Приложения, сохраняемые в папку {other_folder}",
+        "apps_saved_to_other": "Приложения, сохраняемые в папку «{other_folder}»",
         "other_names_desc": "Точное совпадение финального имени клипа, без учета регистра. Пример: chrome",
         "check_updates": "Проверить обновления",
         "open_latest_release": "Открыть последний релиз",
@@ -1120,19 +1159,24 @@ def refresh_localized_properties(props, data=None) -> None:
 
     clip_paths = get_group_content(props, PN.GR_CLIPS_PATH_SETTINGS)
     set_property_description(clip_paths, PN.PROP_CLIPS_BASE_PATH, tr("base_folder", data=data))
-    set_property_description(clip_paths, PN.TXT_CLIPS_BASE_PATH_WARNING, tr("same_drive_warning", data=data))
+    set_property_description(clip_paths, PN.BTN_USE_OBS_FOLDER, tr("use_obs_folder", data=data))
+    set_property_description(clip_paths, PN.BTN_CHECK_FOLDERS, tr("check_folders", data=data))
+    set_property_description(clip_paths, PN.BTN_FOLDER_GUIDE, tr("folder_guide", data=data))
+    set_property_description(clip_paths, PN.PROP_SHOW_MORE_FOLDERS, tr("show_more_folders", data=data))
     set_property_description(clip_paths, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS,
                              tr("show_override_folder_settings", data=data))
     set_property_description(clip_paths, PN.PROP_CLIPS_OVERRIDE_PATH, tr("override_folder", data=data))
-    set_property_description(clip_paths, PN.TXT_CLIPS_OVERRIDE_PATH_WARNING, tr("same_drive_warning", data=data))
     set_property_description(clip_paths, PN.PROP_RECORDING_FOLDER, tr("recording_folder", data=data))
-    set_property_description(clip_paths, PN.TXT_RECORDING_FOLDER_DESC, tr("recording_folder_desc", data=data))
     set_property_description(clip_paths, PN.PROP_SHORT_BUFFER_PERCENT, tr("short_clip_duration", data=data))
     set_property_description(clip_paths, PN.TXT_SHORT_BUFFER_PERCENT_DESC, tr("short_clip_duration_desc", data=data))
     set_property_description(clip_paths, PN.PROP_CLIPS_CREATE_LINKS, tr("create_hard_links", data=data))
-    set_property_description(clip_paths, PN.TXT_CLIPS_CREATE_LINKS_DESC, tr("create_hard_links_desc", data=data))
     set_property_description(clip_paths, PN.PROP_CLIPS_LINKS_FOLDER_PATH, tr("links_folder", data=data))
-    set_property_description(clip_paths, PN.TXT_CLIPS_LINKS_FOLDER_PATH_WARNING, tr("same_drive_warning", data=data))
+    set_property_description(clip_paths, PN.TXT_APP_OTHER_NAMES_INVALID, tr("other_names_invalid", data=data))
+    set_property_description(clip_paths, PN.PROP_APP_OTHER_NAMES,
+                             tr("apps_saved_to_other", data=data, other_folder=CONSTANTS.OTHER_FOLDER_NAME))
+    set_property_description(clip_paths, PN.TXT_APP_OTHER_NAMES_DESC, tr("other_names_desc", data=data))
+    if clip_paths is not None:
+        refresh_folder_properties(clip_paths, data)
 
     clip_naming = get_group_content(props, PN.GR_CLIP_NAMING_SETTINGS)
     set_property_description(clip_naming, PN.PROP_CLIPS_NAMING_MODE, tr("clip_name", data=data))
@@ -1183,169 +1227,83 @@ def refresh_localized_properties(props, data=None) -> None:
     set_property_description(app_rules, PN.TXT_APP_NAME_REPLACEMENTS_INVALID_FORMAT,
                              tr("replacement_invalid_format", data=data))
     set_property_description(app_rules, PN.TXT_APP_NAME_REPLACEMENTS_DESC, tr("replacement_format_desc", data=data))
-    set_property_description(app_rules, PN.TXT_APP_OTHER_NAMES_TITLE,
-                             tr("send_to_other_desc", data=data, other_folder=CONSTANTS.OTHER_FOLDER_NAME))
-    set_property_description(app_rules, PN.TXT_APP_OTHER_NAMES_INVALID, tr("other_names_invalid", data=data))
-    set_property_description(app_rules, PN.PROP_APP_OTHER_NAMES,
-                             tr("apps_saved_to_other", data=data, other_folder=CONSTANTS.OTHER_FOLDER_NAME))
-    set_property_description(app_rules, PN.TXT_APP_OTHER_NAMES_DESC, tr("other_names_desc", data=data))
 
 
 def setup_clip_paths_settings(group_obj):
-    add_int_slider = getattr(obs, "obs_properties_add_int_slider", None)
+    add_int_slider = getattr(obs, "obs_properties_add_int_slider", None) or obs.obs_properties_add_int
 
-    # ----- Clips base path -----
-    base_path_prop = obs.obs_properties_add_path(
-        props=group_obj,
-        name=PN.PROP_CLIPS_BASE_PATH,
-        description=tr("base_folder"),
-        type=obs.OBS_PATH_DIRECTORY,
-        filter=None,
-        default_path=str(CONSTANTS.DEFAULT_CLIPS_BASE_PATH)
-    )
-
-    t = obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_CLIPS_BASE_PATH_WARNING,
-        description=tr("same_drive_warning"),
-        type=obs.OBS_TEXT_INFO
-    )
-
-    obs.obs_property_text_set_info_type(t, obs.OBS_TEXT_INFO_WARNING)
-
-    show_override_folder_prop = obs.obs_properties_add_bool(
-        props=group_obj,
-        name=PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS,
-        description=tr("show_override_folder_settings")
-    )
-
-    # ----- Override save path -----
-    override_path_prop = obs.obs_properties_add_path(
-        props=group_obj,
-        name=PN.PROP_CLIPS_OVERRIDE_PATH,
-        description=tr("override_folder"),
-        type=obs.OBS_PATH_DIRECTORY,
-        filter=None,
-        default_path=str(CONSTANTS.DEFAULT_OVERRIDE_PATH)
-    )
-
-    override_warn = obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_CLIPS_OVERRIDE_PATH_WARNING,
-        description=tr("same_drive_warning"),
-        type=obs.OBS_TEXT_INFO
-    )
-
-    obs.obs_property_text_set_info_type(override_warn, obs.OBS_TEXT_INFO_WARNING)
-    obs.obs_property_set_visible(
-        override_path_prop,
-        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
-    )
-    obs.obs_property_set_visible(
-        override_warn,
-        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
-    )
-
-    # ----- Short clip length -----
-    if add_int_slider is not None:
-        short_buffer_prop = add_int_slider(
+    def add_folder(name: str, label: str, default_path: Path):
+        return obs.obs_properties_add_path(
             props=group_obj,
-            name=PN.PROP_SHORT_BUFFER_PERCENT,
-            description=tr("short_clip_duration"),
-            min=5, max=100,
-            step=5
+            name=name,
+            description=tr(label),
+            type=obs.OBS_PATH_DIRECTORY,
+            filter=None,
+            default_path=str(default_path)
         )
-    else:
-        short_buffer_prop = obs.obs_properties_add_int(
+
+    def add_info(name: str, text: str = ""):
+        return obs.obs_properties_add_text(
             props=group_obj,
-            name=PN.PROP_SHORT_BUFFER_PERCENT,
-            description=tr("short_clip_duration"),
-            min=5, max=100,
-            step=5
+            name=name,
+            description=text,
+            type=obs.OBS_TEXT_INFO
         )
-    short_buffer_desc = obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_SHORT_BUFFER_PERCENT_DESC,
-        description=tr("short_clip_duration_desc"),
-        type=obs.OBS_TEXT_INFO
-    )
-    obs.obs_property_set_visible(
-        short_buffer_prop,
-        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
-    )
-    obs.obs_property_set_visible(
-        short_buffer_desc,
-        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
-    )
 
-    # ----- Alternative full-recording folder (Alt + record hotkey) -----
-    recording_folder_prop = obs.obs_properties_add_path(
+    def add_switch(name: str, label: str):
+        return obs.obs_properties_add_bool(props=group_obj, name=name, description=tr(label))
+
+    # ----- The clips folder; texts and visibility come from refresh_folder_properties() -----
+    folder_props = [add_folder(PN.PROP_CLIPS_BASE_PATH, "base_folder", CONSTANTS.DEFAULT_CLIPS_BASE_PATH)]
+    add_info(PN.TXT_NEXT_CLIP)
+    problems_text = add_info(PN.TXT_FOLDER_PROBLEMS)
+    obs.obs_property_text_set_info_type(problems_text, obs.OBS_TEXT_INFO_ERROR)
+    obs.obs_properties_add_button(group_obj, PN.BTN_USE_OBS_FOLDER, tr("use_obs_folder"), use_obs_folder_callback)
+    obs.obs_properties_add_button(group_obj, PN.BTN_CHECK_FOLDERS, tr("check_folders"), check_folders_callback)
+    obs.obs_properties_add_button(group_obj, PN.BTN_FOLDER_GUIDE, tr("folder_guide"), open_folder_guide_callback)
+    folder_props.append(add_switch(PN.PROP_SHOW_MORE_FOLDERS, "show_more_folders"))
+
+    # ----- Extra hotkeys -----
+    folder_props.append(add_switch(PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS, "show_override_folder_settings"))
+    folder_props.append(add_folder(PN.PROP_CLIPS_OVERRIDE_PATH, "override_folder", CONSTANTS.DEFAULT_OVERRIDE_PATH))
+    add_info(PN.TXT_CLIPS_OVERRIDE_PATH_DESC)
+    folder_props.append(add_folder(PN.PROP_RECORDING_FOLDER, "recording_folder", CONSTANTS.DEFAULT_CLIPS_BASE_PATH))
+    add_info(PN.TXT_RECORDING_FOLDER_DESC)
+    short_buffer_prop = add_int_slider(
         props=group_obj,
-        name=PN.PROP_RECORDING_FOLDER,
-        description=tr("recording_folder"),
-        type=obs.OBS_PATH_DIRECTORY,
+        name=PN.PROP_SHORT_BUFFER_PERCENT,
+        description=tr("short_clip_duration"),
+        min=5, max=100,
+        step=5
+    )
+    obs.obs_property_int_set_suffix(short_buffer_prop, " %")
+    add_info(PN.TXT_SHORT_BUFFER_PERCENT_DESC, tr("short_clip_duration_desc"))
+
+    # ----- Links -----
+    folder_props.append(add_switch(PN.PROP_CLIPS_CREATE_LINKS, "create_hard_links"))
+    folder_props.append(add_folder(PN.PROP_CLIPS_LINKS_FOLDER_PATH, "links_folder", CONSTANTS.DEFAULT_LINKS_PATH))
+    add_info(PN.TXT_CLIPS_LINKS_FOLDER_PATH_DESC)
+
+    # ----- Apps that go to the Other folder -----
+    other_names_err = add_info(PN.TXT_APP_OTHER_NAMES_INVALID, tr("other_names_invalid"))
+    obs.obs_property_set_visible(other_names_err, False)
+    other_names_list = obs.obs_properties_add_editable_list(
+        props=group_obj,
+        name=PN.PROP_APP_OTHER_NAMES,
+        description=tr("apps_saved_to_other", other_folder=CONSTANTS.OTHER_FOLDER_NAME),
+        type=obs.OBS_EDITABLE_LIST_TYPE_STRINGS,
         filter=None,
-        default_path=str(CONSTANTS.DEFAULT_CLIPS_BASE_PATH)
+        default_path=None
     )
-    recording_folder_desc = obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_RECORDING_FOLDER_DESC,
-        description=tr("recording_folder_desc"),
-        type=obs.OBS_TEXT_INFO
-    )
-    obs.obs_property_set_visible(
-        recording_folder_prop,
-        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
-    )
-    obs.obs_property_set_visible(
-        recording_folder_desc,
-        obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
-    )
+    add_info(PN.TXT_APP_OTHER_NAMES_DESC, tr("other_names_desc"))
 
-    # ----- Create links -----
-    create_links_prop = obs.obs_properties_add_bool(
-        props=group_obj,
-        name=PN.PROP_CLIPS_CREATE_LINKS,
-        description=tr("create_hard_links"),
-    )
-    obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_CLIPS_CREATE_LINKS_DESC,
-        description=tr("create_hard_links_desc"),
-        type=obs.OBS_TEXT_INFO
-    )
-
-    links_path_prop = obs.obs_properties_add_path(
-        props=group_obj,
-        name=PN.PROP_CLIPS_LINKS_FOLDER_PATH,
-        description=tr("links_folder"),
-        type=obs.OBS_PATH_DIRECTORY,
-        filter=None,
-        default_path=str(CONSTANTS.DEFAULT_LINKS_PATH)
-    )
-    links_path_warn = obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_CLIPS_LINKS_FOLDER_PATH_WARNING,
-        description=tr("same_drive_warning"),
-        type=obs.OBS_TEXT_INFO
-    )
-    obs.obs_property_text_set_info_type(links_path_warn, obs.OBS_TEXT_INFO_WARNING)
-
-    obs.obs_property_set_visible(links_path_prop,
-                                 obs.obs_data_get_bool(VARIABLES.script_settings,
-                                                       PN.PROP_CLIPS_CREATE_LINKS))
-    obs.obs_property_set_visible(links_path_warn,
-                                 obs.obs_data_get_bool(VARIABLES.script_settings,
-                                                       PN.PROP_CLIPS_CREATE_LINKS))
+    refresh_folder_properties(group_obj, VARIABLES.script_settings)
 
     # ----- Callbacks -----
-    obs.obs_property_set_modified_callback(base_path_prop, check_base_path_callback)
-    obs.obs_property_set_modified_callback(show_override_folder_prop, update_override_path_prop_visibility)
-    obs.obs_property_set_modified_callback(override_path_prop, check_override_path_callback)
+    for prop in folder_props:
+        obs.obs_property_set_modified_callback(prop, update_folders_callback)
     obs.obs_property_set_modified_callback(short_buffer_prop, persist_settings_callback)
-    obs.obs_property_set_modified_callback(recording_folder_prop, persist_settings_callback)
-    obs.obs_property_set_modified_callback(create_links_prop, update_links_path_prop_visibility)
-    obs.obs_property_set_modified_callback(links_path_prop, check_clips_links_folder_path_callback)
+    obs.obs_property_set_modified_callback(other_names_list, update_other_names_callback)
 
 
 def setup_clip_naming_settings(group_obj):
@@ -1394,7 +1352,7 @@ def setup_clip_naming_settings(group_obj):
     obs.obs_property_set_visible(filename_format_prop, True)
     obs.obs_property_set_visible(filename_error_text, False)
 
-    obs.obs_property_set_modified_callback(clip_naming_mode_prop, persist_settings_callback)
+    obs.obs_property_set_modified_callback(clip_naming_mode_prop, update_naming_mode_callback)
     obs.obs_property_set_modified_callback(filename_format_prop, check_filename_template_callback)
 
 
@@ -1609,37 +1567,6 @@ def setup_app_name_rules_settings(group_obj):
         type=obs.OBS_TEXT_INFO
     )
 
-    obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_APP_OTHER_NAMES_TITLE,
-        description=tr("send_to_other_desc", other_folder=CONSTANTS.OTHER_FOLDER_NAME),
-        type=obs.OBS_TEXT_INFO
-    )
-
-    other_names_err = obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_APP_OTHER_NAMES_INVALID,
-        description=tr("other_names_invalid"),
-        type=obs.OBS_TEXT_INFO
-    )
-    obs.obs_property_set_visible(other_names_err, False)
-
-    other_names_list = obs.obs_properties_add_editable_list(
-        props=group_obj,
-        name=PN.PROP_APP_OTHER_NAMES,
-        description=tr("apps_saved_to_other", other_folder=CONSTANTS.OTHER_FOLDER_NAME),
-        type=obs.OBS_EDITABLE_LIST_TYPE_STRINGS,
-        filter=None,
-        default_path=None
-    )
-    obs.obs_properties_add_text(
-        props=group_obj,
-        name=PN.TXT_APP_OTHER_NAMES_DESC,
-        description=tr("other_names_desc"),
-        type=obs.OBS_TEXT_INFO
-    )
-
-    obs.obs_property_set_modified_callback(other_names_list, update_other_names_callback)
     obs.obs_property_set_modified_callback(replacement_list, update_name_replacements_callback)
 
 
@@ -1935,6 +1862,15 @@ def persist_settings_callback(p, prop, data):
     return True
 
 
+def update_naming_mode_callback(p, prop, data):
+    next_clip_prop = obs.obs_properties_get(p, PN.TXT_NEXT_CLIP)  # in another group
+    if next_clip_prop is not None:
+        broken = PN.PROP_CLIPS_BASE_PATH in find_folder_problems(data)
+        obs.obs_property_set_description(next_clip_prop, next_clip_text(data, broken=broken))
+    save_persisted_settings_from_obs_data(data)
+    return True
+
+
 def update_interface_language_callback(p, prop, data):
     if VARIABLES.interface_language_refreshing:
         return True
@@ -1994,55 +1930,79 @@ def check_filename_template_callback(p, prop, data):
     return True
 
 
-def update_override_path_prop_visibility(p, prop, data):
-    path_prop = obs.obs_properties_get(p, PN.PROP_CLIPS_OVERRIDE_PATH)
-    path_warn_prop = obs.obs_properties_get(p, PN.TXT_CLIPS_OVERRIDE_PATH_WARNING)
-    short_buffer_prop = obs.obs_properties_get(p, PN.PROP_SHORT_BUFFER_PERCENT)
-    short_buffer_desc = obs.obs_properties_get(p, PN.TXT_SHORT_BUFFER_PERCENT_DESC)
-    recording_folder_prop = obs.obs_properties_get(p, PN.PROP_RECORDING_FOLDER)
-    recording_folder_desc = obs.obs_properties_get(p, PN.TXT_RECORDING_FOLDER_DESC)
-    is_visible = obs.obs_data_get_bool(data, obs.obs_property_name(prop))
-
-    obs.obs_property_set_visible(path_prop, is_visible)
-    obs.obs_property_set_visible(path_warn_prop, is_visible)
-    obs.obs_property_set_visible(short_buffer_prop, is_visible)
-    obs.obs_property_set_visible(short_buffer_desc, is_visible)
-    obs.obs_property_set_visible(recording_folder_prop, is_visible)
-    obs.obs_property_set_visible(recording_folder_desc, is_visible)
+def update_folders_callback(p, prop, data):
+    if VARIABLES.interface_language_refreshing:
+        return True  # already refreshed and saved, and OBS calls this once per field
+    refresh_folder_properties(p, data)
     save_persisted_settings_from_obs_data(data)
     return True
 
 
-def update_links_path_prop_visibility(p, prop, data):
-    path_prop = obs.obs_properties_get(p, PN.PROP_CLIPS_LINKS_FOLDER_PATH)
-    path_warn_prop = obs.obs_properties_get(p, PN.TXT_CLIPS_LINKS_FOLDER_PATH_WARNING)
-    is_visible = obs.obs_data_get_bool(data, obs.obs_property_name(prop))
-
-    obs.obs_property_set_visible(path_prop, is_visible)
-    obs.obs_property_set_visible(path_warn_prop, is_visible)
-    save_persisted_settings_from_obs_data(data)
+def check_folders_callback(props, *args):
+    refresh_folder_properties(props, VARIABLES.script_settings, checked=True)
     return True
 
 
-def check_clips_links_folder_path_callback(p, prop, data):
-    """
-    Checks clips links folder path is in the same disk as OBS recordings path.
-    If it's not - sets OBS records path as base path for clips + '_links' and shows warning.
-    """
-    warn_text = obs.obs_properties_get(p, PN.TXT_CLIPS_LINKS_FOLDER_PATH_WARNING)
+def use_obs_folder_callback(props, *args):
+    """Clears the clips folder: the path field itself can't be emptied by hand."""
+    obs.obs_data_set_string(VARIABLES.script_settings, PN.PROP_CLIPS_BASE_PATH, "")
+    return update_folders_callback(props, None, VARIABLES.script_settings)
 
-    obs_records_path = Path(get_base_path())
-    curr_path = Path(obs.obs_data_get_string(data, PN.PROP_CLIPS_LINKS_FOLDER_PATH))
 
-    if not len(curr_path.parts) or obs_records_path.parts[0] == curr_path.parts[0]:
-        obs.obs_property_text_set_info_type(warn_text, obs.OBS_TEXT_INFO_WARNING)
-    else:
-        obs.obs_property_text_set_info_type(warn_text, obs.OBS_TEXT_INFO_ERROR)
-        obs.obs_data_set_string(data,
-                                PN.PROP_CLIPS_LINKS_FOLDER_PATH,
-                                str(obs_records_path / '_links'))
-    save_persisted_settings_from_obs_data(data)
-    return True
+def open_folder_guide_callback(*args):
+    webbrowser.open(CONSTANTS.FOLDER_GUIDE_URLS[get_ui_language()], 1)
+
+
+def set_info_text(props, prop_name: str, text: str, *, error: bool = False) -> None:
+    prop = obs.obs_properties_get(props, prop_name)
+    obs.obs_property_set_description(prop, text)
+    obs.obs_property_text_set_info_type(prop, obs.OBS_TEXT_INFO_ERROR if error else obs.OBS_TEXT_INFO_NORMAL)
+
+
+def refresh_folder_properties(props, data, *, checked: bool = False) -> None:
+    """Updates what the folder settings show: the next clip's folder, problems, hidden fields."""
+    more = obs.obs_data_get_bool(data, PN.PROP_SHOW_MORE_FOLDERS)
+    extra = more and obs.obs_data_get_bool(data, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS)
+    links = more and obs.obs_data_get_bool(data, PN.PROP_CLIPS_CREATE_LINKS)
+
+    problems = find_folder_problems(data)
+    texts = {}
+    for prop_name, (key, kwargs) in problems.items():
+        escaped = {name: html.escape(value, quote=False) for name, value in kwargs.items()}
+        texts[prop_name] = tr(key, data=data, **escaped)
+
+    next_clip = next_clip_text(data, broken=PN.PROP_CLIPS_BASE_PATH in problems)
+    if checked and not problems:
+        next_clip += "<br/>" + tr("folders_ok", data=data)
+    set_info_text(props, PN.TXT_NEXT_CLIP, next_clip)
+
+    for prop_name, text_name, desc_key, shown in (
+        (PN.PROP_CLIPS_OVERRIDE_PATH, PN.TXT_CLIPS_OVERRIDE_PATH_DESC, "override_folder_desc", extra),
+        (PN.PROP_RECORDING_FOLDER, PN.TXT_RECORDING_FOLDER_DESC, "recording_folder_desc", extra),
+        (PN.PROP_CLIPS_LINKS_FOLDER_PATH, PN.TXT_CLIPS_LINKS_FOLDER_PATH_DESC, "links_folder_desc", links),
+    ):
+        problem = texts.pop(prop_name, "") if shown else ""  # a hidden folder's problem stays at the top
+        set_info_text(props, text_name, problem or tr(desc_key, data=data), error=bool(problem))
+        for name in (prop_name, text_name):
+            obs.obs_property_set_visible(obs.obs_properties_get(props, name), shown)
+
+    if PN.PROP_CLIPS_BASE_PATH in texts and obs.obs_data_get_string(data, PN.PROP_CLIPS_BASE_PATH):
+        texts[PN.PROP_CLIPS_BASE_PATH] += " " + tr("clips_stay_in_obs_folder", data=data)
+    set_info_text(props, PN.TXT_FOLDER_PROBLEMS, "<br/>".join(texts.values()), error=True)
+
+    for prop_name, shown in (
+        (PN.TXT_FOLDER_PROBLEMS, bool(texts)),
+        (PN.BTN_USE_OBS_FOLDER, bool(obs.obs_data_get_string(data, PN.PROP_CLIPS_BASE_PATH))),
+        (PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS, more),
+        (PN.PROP_SHORT_BUFFER_PERCENT, extra),
+        (PN.TXT_SHORT_BUFFER_PERCENT_DESC, extra),
+        (PN.PROP_CLIPS_CREATE_LINKS, more),
+        (PN.PROP_APP_OTHER_NAMES, more),
+        (PN.TXT_APP_OTHER_NAMES_DESC, more),
+    ):
+        obs.obs_property_set_visible(obs.obs_properties_get(props, prop_name), shown)
+    if not more:
+        obs.obs_property_set_visible(obs.obs_properties_get(props, PN.TXT_APP_OTHER_NAMES_INVALID), False)
 
 
 def update_notifications_menu_callback(p, prop, data):
@@ -2074,44 +2034,6 @@ def test_sound_callback(*args):
     path_prop = next((path for enabled, path in NOTIFICATION_SOUNDS if obs.obs_data_get_bool(settings, enabled)),
                      PN.PROP_NOTIFY_CLIPS_ON_SUCCESS_PATH)
     play_sound(obs.obs_data_get_string(settings, path_prop))
-
-
-def check_base_path_callback(p, prop, data):
-    """
-    Checks base path is in the same disk as OBS recordings path.
-    If it's not - sets OBS records path as base path for clips and shows warning.
-    """
-    warn_text = obs.obs_properties_get(p, PN.TXT_CLIPS_BASE_PATH_WARNING)
-
-    obs_records_path = Path(get_base_path())
-    curr_path = Path(obs.obs_data_get_string(data, PN.PROP_CLIPS_BASE_PATH))
-
-    if not len(curr_path.parts) or obs_records_path.parts[0] == curr_path.parts[0]:
-        obs.obs_property_text_set_info_type(warn_text, obs.OBS_TEXT_INFO_WARNING)
-    else:
-        obs.obs_property_text_set_info_type(warn_text, obs.OBS_TEXT_INFO_ERROR)
-        obs.obs_data_set_string(data, PN.PROP_CLIPS_BASE_PATH, str(obs_records_path))
-    save_persisted_settings_from_obs_data(data)
-    return True
-
-
-def check_override_path_callback(p, prop, data):
-    """
-    Checks override save path is in the same disk as OBS recordings path.
-    If it's not - sets OBS records path as override path and shows warning.
-    """
-    warn_text = obs.obs_properties_get(p, PN.TXT_CLIPS_OVERRIDE_PATH_WARNING)
-
-    obs_records_path = Path(get_base_path())
-    curr_path = Path(obs.obs_data_get_string(data, PN.PROP_CLIPS_OVERRIDE_PATH))
-
-    if not len(curr_path.parts) or obs_records_path.parts[0] == curr_path.parts[0]:
-        obs.obs_property_text_set_info_type(warn_text, obs.OBS_TEXT_INFO_WARNING)
-    else:
-        obs.obs_property_text_set_info_type(warn_text, obs.OBS_TEXT_INFO_ERROR)
-        obs.obs_data_set_string(data, PN.PROP_CLIPS_OVERRIDE_PATH, str(obs_records_path))
-    save_persisted_settings_from_obs_data(data)
-    return True
 
 
 def import_aliases_from_json_callback(*args):
@@ -2379,13 +2301,40 @@ def sanitize_clip_name(value: Any) -> str:
     return safe_name
 
 
+def on_another_drive(first: Path, second: Path) -> bool:
+    first_drive, second_drive = first.drive.casefold(), second.drive.casefold()
+    return bool(first_drive and second_drive and first_drive != second_drive)
+
+
+def find_folder_problem(folder: Path, same_drive_as: Path | None = None) -> tuple[str, dict[str, str]] | None:
+    """
+    Why clips can't be saved in `folder`, as a UI text key and its arguments; None if they can. A folder that
+    doesn't exist yet is fine: it is made when the first clip is saved.
+    shortcut: an unreachable network path makes OBS wait here, move to a worker thread if people record to one.
+    """
+    if same_drive_as is not None and on_another_drive(folder, same_drive_as):
+        return "folder_wrong_drive", {"path": str(folder), "drive": same_drive_as.drive}
+
+    existing = next((path for path in (folder, *folder.parents) if os.path.exists(path)), None)
+    if existing is None:
+        return "folder_not_found", {"path": str(folder)}
+
+    probe = existing / f".moment_replays_{os.getpid()}"  # not tempfile: it retries for long when access is denied
+    try:
+        before = os.stat(existing)
+        os.makedirs(probe, exist_ok=True)
+        os.rmdir(probe)
+    except OSError:
+        return "folder_not_writable", {"path": str(folder)}
+    with suppress(OSError):
+        os.utime(existing, ns=(before.st_atime_ns, before.st_mtime_ns))  # players sort folders by date
+    return None
+
+
 def ensure_same_drive_for_rename(source_path: Path | str, target_path: Path | str) -> None:
     source_path = Path(source_path)
     target_path = Path(target_path)
-    source_drive = source_path.drive.casefold()
-    target_drive = target_path.drive.casefold()
-
-    if source_drive and target_drive and source_drive != target_drive:
+    if on_another_drive(source_path, target_path):
         raise OSError(
             f"Cannot move clip across drives: {source_path} -> {target_path}. "
             "Keep OBS Recording Path and Moment Replays paths on the same drive."
@@ -2403,11 +2352,10 @@ def create_hard_link(file_path: Path | str, links_folder: Path | str) -> bool:
     links_folder = Path(links_folder)
     link_path = links_folder / file_path.name
 
-    if (VARIABLES.last_links_folder != links_folder) or not links_folder.exists():
-        os.makedirs(str(links_folder), exist_ok=True)
-        VARIABLES.last_links_folder = links_folder
-
     try:
+        if (VARIABLES.last_links_folder != links_folder) or not links_folder.exists():
+            os.makedirs(str(links_folder), exist_ok=True)
+            VARIABLES.last_links_folder = links_folder
         os.link(str(file_path), str(link_path))
     except FileExistsError:
         with suppress(Exception):
@@ -2621,6 +2569,46 @@ def get_base_path(script_settings: Any | None = None) -> Path:
         return Path(get_obs_config("SimpleOutput", "FilePath"))
     else:
         return Path(get_obs_config("AdvOut", "RecFilePath"))
+
+
+def find_folder_problems(data) -> dict[str, tuple[str, dict[str, str]]]:
+    """Problems of the folders in use (see find_folder_problem), by setting."""
+    def setting(prop_name: str) -> str:
+        return obs.obs_data_get_string(data, prop_name)
+
+    obs_path = read_obs_recording_path()
+    obs_folder = Path(obs_path)
+    folders = [(PN.PROP_CLIPS_BASE_PATH, setting(PN.PROP_CLIPS_BASE_PATH) or obs_path, obs_folder)]
+    if obs.obs_data_get_bool(data, PN.PROP_SHOW_OVERRIDE_FOLDER_SETTINGS):
+        folders.append((PN.PROP_CLIPS_OVERRIDE_PATH, setting(PN.PROP_CLIPS_OVERRIDE_PATH), obs_folder))
+        folders.append((PN.PROP_RECORDING_FOLDER, setting(PN.PROP_RECORDING_FOLDER), None))
+    if obs.obs_data_get_bool(data, PN.PROP_CLIPS_CREATE_LINKS):
+        folders.append((PN.PROP_CLIPS_LINKS_FOLDER_PATH, setting(PN.PROP_CLIPS_LINKS_FOLDER_PATH), obs_folder))
+
+    problems = {}
+    for prop_name, folder, same_drive_as in folders:
+        problem = find_folder_problem(Path(folder), same_drive_as) if folder else None
+        if problem is not None:
+            problems[prop_name] = problem
+    return problems
+
+
+def next_clip_text(data, *, broken: bool) -> str:
+    """Where a normal replay save puts its clip; with a broken clips folder it stays where OBS wrote it."""
+    def show(path: Path) -> str:
+        return html.escape(os.path.join(path, ""), quote=False)
+
+    if broken:
+        return tr("next_clip", data=data, path=show(Path(read_obs_recording_path())))
+
+    base = Path(obs.obs_data_get_string(data, PN.PROP_CLIPS_BASE_PATH) or read_obs_recording_path())
+    by_scene = obs.obs_data_get_int(data, PN.PROP_CLIPS_NAMING_MODE) == ClipNamingModes.CURRENT_SCENE.value
+    name = tr("next_clip_scene" if by_scene else "next_clip_game", data=data)
+    text = tr("next_clip", data=data, path=show(base / f"<{name}>"))
+    if not by_scene:
+        text += "<br/>" + tr("next_clip_other", data=data, other_folder=CONSTANTS.OTHER_FOLDER_NAME,
+                             path=show(base / CONSTANTS.OTHER_FOLDER_NAME))
+    return text
 
 
 # -------------------- alt_recording.py --------------------

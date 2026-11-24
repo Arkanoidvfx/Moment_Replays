@@ -17,13 +17,14 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
     (handy for launchers or duplicate `.exe` names).
   - *Executable name fixes*: e.g. `TslGame > PUBG`, `VALORANT-Win64-Shipping > VALORANT`.
   - *Other folder*: route chosen apps (browsers, chat apps, …) into a single `Other` folder.
-- **Sound notifications** on clip save success/failure and on recording start/stop.
+- **Sound notifications** on clip save success/failure and on recording start/stop, with a volume slider.
 - **Short clips** — a hotkey that keeps only the last *N%* of the replay buffer
   (trimmed losslessly with ffmpeg stream-copy).
-- **Alternative save folder** — a hotkey that saves the next replay clip to a separate folder.
+- **Second clips folder** — a hotkey that saves the next replay clip to a separate folder.
 - **Alternative recording** — a hotkey that records a full OBS recording (not the replay buffer)
   straight into a separate folder of your choice, on any drive.
-- **Hard links** — optionally mirror each clip into a links folder (same drive).
+- **Shared folder** — optionally shows each clip in one more folder without using more
+  space (hard links, same drive).
 - **Auto scene (Game / Desktop)** — optional: switches to a `Game` scene once a
   `Game Capture` source has hooked your fullscreen game, and back to `Desktop`
   when you leave it. Off unless enabled and both scenes and the source exist.
@@ -62,10 +63,10 @@ notifications are applied automatically whenever a replay is saved.
 It also registers five extra actions, bindable under **Settings → Hotkeys**:
 
 - **Save short clip** — saves a replay trimmed to the last *N%* of the buffer.
-- **Save buffer (alternative folder)** — saves the next replay clip to the alternative folder.
+- **Save buffer (override folder)** — saves the next replay clip to the second clips folder.
 - **Open last saved video** — opens the most recently saved clip or recording in your default player.
 - **Start/stop recording (alternative folder)** — records a full OBS recording into the
-  configured *Recording folder* instead of the OBS default path.
+  configured *Recordings folder* instead of the OBS default path.
 - **Mark moment** — marks "this was cool" while you play; the next saved clip
   that contains the moment lists it in its clip info.
 
@@ -74,13 +75,14 @@ Defaults (applied only if the action was never bound): `Ctrl+F10` short clip,
 Alternative recording has no default — bind it yourself (e.g. `Alt+F9`, next to
 your normal record key). Change them freely in OBS hotkey settings.
 
-> The two *alternative* hotkeys and the *Recording folder* only work when
-> **Alternative recording modes** is enabled in the script settings.
+> *Save short clip*, *Save buffer (override folder)* and *Start/stop recording (alternative
+> folder)* only work while **Extra hotkeys** is on (Clip folders → More folders).
 
 ## Settings
 
-- **Clip paths** — base folder (defaults to the OBS recording path), alternative
-  folder, short-clip length, and hard links.
+- **Clip folders** — where clips go (the OBS recording folder unless you choose another),
+  and under *More folders*: the second clips folder, recordings folder, short-clip length,
+  shared folder and the `Other` list. See the [folder guide](FOLDERS.md).
 - **Clip naming** — naming mode and the file-name template (`strftime` tokens + `%NAME`).
 - **Moments** — *Auto-switch Game / Desktop scenes* (needs scenes `Game` and
   `Desktop` and a game capture source `Game Capture` in *any fullscreen* mode;
@@ -92,8 +94,9 @@ your normal record key). Change them freely in OBS hotkey settings.
   re-hooks once and keeps that game off `Game` for 60 s, so clips never end up
   black with sound. While another OBS is running, auto scene pauses (releases the
   game capture and stays on `Desktop`) so it never takes that OBS's game hook.
-- **Sounds** — enable/disable and pick a `.wav` file for each event.
-- **Naming rules** — path-specific names, `.exe` name fixes, and the `Other` folder list.
+- **Sounds** — volume, a test button, and for each event on/off and a `.wav` file. A
+  file the script can't make quieter (not a plain PCM WAV) plays at its own volume.
+- **Naming rules** — `.exe` name fixes.
 - **Updates** — manual update check and a button to open the latest release.
 
 Bundled sounds are pre-selected for convenience; replace them with your own
@@ -170,3 +173,4 @@ See [CHANGELOG.md](CHANGELOG.md) for the version history.
 (иначе — `.moment.json` рядом), точное время меток и клипов, запись нажатий клавиш
 (по умолчанию выключено).
 Для коротких клипов нужен `ffmpeg` в `PATH`.
+Как выбрать папки для клипов: [инструкция](FOLDERS.ru.md).
