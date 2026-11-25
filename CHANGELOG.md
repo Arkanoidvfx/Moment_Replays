@@ -3,8 +3,8 @@
 All notable changes to Moment Replays are documented here.
 
 ## Unreleased
-- **Sound volume** — a slider and a test button in *Sounds*. 100 % (the default) plays the
-  files exactly as before.
+- **Sound volume** — a slider and a test button in *Sounds*. The default is 40 %, quieter than
+  before; 100 % plays the files at their own volume.
 - **Clip folders** — the panel starts with the one folder most people need and shows where the
   next clip will be saved; everything else is behind *More folders* (hidden settings keep
   working). Folders that are missing, can't be written to or are on the wrong drive get a red
