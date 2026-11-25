@@ -2,6 +2,18 @@
 
 All notable changes to Moment Replays are documented here.
 
+## Unreleased
+- **The script updates itself** — when OBS starts it downloads a newer release into its own
+  folder, after checking every file's SHA-256, and uses it from the next OBS start. Nothing
+  is replaced if a file is damaged or the new script cannot load. Releases before this one
+  still need one manual update.
+- **Settings survive a reinstall** — the script keeps a second copy of its settings in
+  `%APPDATA%\Moment Replays`; a script put into a new or emptied folder starts from it.
+- **Hotkeys are part of the settings** — the script's five keys are saved in its settings
+  file too, so a new scene collection or a reinstall gets the keys you had, not the defaults.
+- Settings that OBS did not hold itself (set in the settings file only) are no longer reset
+  to defaults the first time OBS saves.
+
 ## v1.8
 - **Sound volume** — a slider and a test button in *Sounds*. The default is 40 %, quieter than
   before; 100 % plays the files at their own volume.

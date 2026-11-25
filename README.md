@@ -37,7 +37,7 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
 - **Mark moment** — a hotkey that marks the current moment; the next saved clip
   carries it as an annotation.
 - **Bilingual UI** — English / Russian, switchable in the script settings.
-- **Update checks** against GitHub releases.
+- **Updates itself** from GitHub releases; the new version starts with the next OBS start.
 
 ## Requirements
 
@@ -97,7 +97,13 @@ your normal record key). Change them freely in OBS hotkey settings.
 - **Sounds** — volume, a test button, and for each event on/off and a `.wav` file. A
   file the script can't make quieter (not a plain PCM WAV) plays at its own volume.
 - **Naming rules** — `.exe` name fixes.
-- **Updates** — manual update check and a button to open the latest release.
+- **Updates** — the script looks for a newer release when OBS starts (and on the button),
+  checks the files' SHA-256 and replaces its own files; restart OBS to use the new version.
+  If that fails, the status line says why and the button opens the latest release.
+
+Settings and the script's hotkeys are saved in `Moment_Replays.settings.json` next to the
+script, with a second copy in `%APPDATA%\Moment Replays`. A script installed into a new
+folder starts from that copy; delete it for a clean start.
 
 Bundled sounds are pre-selected for convenience; replace them with your own
 `.wav` files or turn notifications off entirely.

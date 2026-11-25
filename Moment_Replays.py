@@ -106,6 +106,10 @@ class CONSTANTS:
     DEFAULT_RECORDING_STOP_SOUND_PATH = SCRIPT_DIR / "Recording_Stoped.wav"
     SETTINGS_PERSIST_PATH = Path(__file__).with_name("Moment_Replays.settings.json")
     LEGACY_SETTINGS_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.settings.json")
+    # A second copy outside the script folder: a new or wiped script folder starts from it.
+    # shortcut: one copy per Windows user, so two OBS setups share it (last save wins); name it per setup if that bites.
+    SETTINGS_BACKUP_PATH = (Path(os.environ["APPDATA"]) / "Moment Replays" / "Moment_Replays.settings.json"
+                            if os.environ.get("APPDATA") else None)
     SETTINGS_SCHEMA_VERSION = 6
     LEGACY_APP_RULES_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.app_rules.json")
     GITHUB_PROJECT_URL = "https://github.com/Arkanoidvfx/Moment_Replays"
@@ -116,6 +120,12 @@ class CONSTANTS:
     }
     GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/Arkanoidvfx/Moment_Replays/releases/latest"
     UPDATE_CHECK_TIMEOUT = 5
+    # Self-update: files of the latest release, named and hashed by its SHA256.json (release.ps1 makes it).
+    UPDATE_SCRIPT_NAME = "Moment_Replays.py"
+    UPDATE_HASHES_NAME = "SHA256.json"
+    UPDATE_FILE_MAX = 20 * 1024 * 1024
+    UPDATE_TAG_RE = re.compile(r"v?\d+(\.\d+)*")
+    UPDATE_FILE_NAME_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")  # a plain name: no folders, no ".."
     OTHER_FOLDER_NAME = "Other"
     SAFE_CLIP_NAME_RE = re.compile(r'[\x00-\x1f<>:"/\\|?*%]')
     RESERVED_WINDOWS_NAMES = frozenset(
@@ -211,6 +221,7 @@ class VARIABLES:
     other_obs_answered_at: float | None = None
     other_obs_error_logged = False
     sidecar_persist_enabled = False
+    settings_backup_written = None
     update_check_in_progress = False
     update_status_props = None
     update_status_refresh_timer_active = False
@@ -344,6 +355,9 @@ HOTKEY_DEFAULTS = {
     PN.HK_OPEN_LAST_VIDEO: ("OBS_KEY_F10", {"control": True, "alt": True}),
     PN.HK_MARK_MOMENT: ("OBS_KEY_F8", {}),
 }
+HOTKEY_NAMES = (PN.HK_SAVE_BUFFER_HALF, PN.HK_SAVE_BUFFER_OVERRIDE, PN.HK_OPEN_LAST_VIDEO, PN.HK_RECORD_ALT,
+                PN.HK_MARK_MOMENT)
+PERSISTED_HOTKEYS_KEY = "hotkeys"  # in the settings file: {hotkey name: [OBS bindings]}
 
 PERSISTED_STRING_DEFAULTS = {
     PN.PROP_INTERFACE_LANGUAGE: "en",
@@ -544,7 +558,11 @@ UI_TEXT = {
             "Checking for updates...<br/>"
             "Current version: <span style=\"font-size: 1.2em;\"><b>{version}</b></span>"
         ),
-        "update_status_available": "Update available: {latest_version} (current: {version}). Open the latest release to update.",
+        "update_status_available": (
+            "Update available: {latest_version} (current: {version}). It was not installed automatically: {reason}. "
+            "Open the latest release to update."
+        ),
+        "update_status_installed": "Version {latest_version} is installed (running now: {version}). Restart OBS to use it.",
         "update_status_current": "Current version {version} is up to date. Latest release: {latest_version}.",
         "update_status_no_release": "No GitHub release is published yet. Current version: {version}.",
         "update_status_http_error": "Update check failed: GitHub returned HTTP {code}.",
@@ -701,7 +719,11 @@ UI_TEXT = {
             "Проверка обновлений...<br/>"
             "Текущая версия: <span style=\"font-size: 1.2em;\"><b>{version}</b></span>"
         ),
-        "update_status_available": "Доступно обновление: {latest_version} (текущая: {version}). Открой последний релиз для обновления.",
+        "update_status_available": (
+            "Доступно обновление: {latest_version} (текущая: {version}). Оно не установилось само: {reason}. "
+            "Открой последний релиз для обновления."
+        ),
+        "update_status_installed": "Версия {latest_version} установлена (сейчас работает {version}). Перезапусти OBS, чтобы она включилась.",
         "update_status_current": "Текущая версия {version} актуальна. Последний релиз: {latest_version}.",
         "update_status_no_release": "GitHub release еще не опубликован. Текущая версия: {version}.",
         "update_status_http_error": "Проверка обновлений не удалась: GitHub вернул HTTP {code}.",
@@ -873,6 +895,64 @@ def fetch_latest_release_info() -> tuple[str, str]:
     return version, release_url
 
 
+def fetch_release_file(tag: str, name: str, limit: int) -> bytes:
+    request = urllib.request.Request(
+        f"{CONSTANTS.GITHUB_PROJECT_URL}/releases/download/{tag}/{name}",
+        headers={"User-Agent": f"Moment-Replays/{CONSTANTS.VERSION}"}
+    )
+    with urllib.request.urlopen(request, timeout=CONSTANTS.UPDATE_CHECK_TIMEOUT) as response:
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{name} is too large")
+    return data
+
+
+def install_update(tag: str) -> str | None:
+    """
+    Replaces the script's files with those of release `tag`, as listed in its SHA256.json
+    ({"file name": "sha256 hex"}). Returns why it did not, or None when the files are in place.
+    OBS keeps running the loaded script: the new one starts with the next OBS start.
+    """
+    folder = CONSTANTS.SCRIPT_DIR
+    script_name = CONSTANTS.UPDATE_SCRIPT_NAME
+    if (folder / ".git").exists():
+        return "this folder is a git checkout"  # the author's working copy: never overwritten
+    if Path(__file__).name != script_name:
+        return "the script file was renamed"    # OBS would keep loading the old file
+    if not CONSTANTS.UPDATE_TAG_RE.fullmatch(tag):
+        return "unexpected release tag"
+
+    ready = []
+    try:
+        hashes = json.loads(fetch_release_file(tag, CONSTANTS.UPDATE_HASHES_NAME, 65536))
+        if not isinstance(hashes, dict) or script_name not in hashes:
+            return "the release has no valid file list"
+        for name, want in hashes.items():
+            if not (isinstance(want, str) and CONSTANTS.UPDATE_FILE_NAME_RE.fullmatch(str(name))):
+                return "the release has no valid file list"
+            target = folder / name
+            if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == want.lower():
+                continue
+            data = fetch_release_file(tag, name, CONSTANTS.UPDATE_FILE_MAX)
+            if hashlib.sha256(data).hexdigest() != want.lower():
+                return f"{name} was damaged on the way"
+            if name == script_name:
+                compile(data, name, "exec")  # a script that cannot load would leave OBS without one
+            part = target.with_name(name + ".update")
+            part.write_bytes(data)
+            ready.append((part, target))
+        ready.sort(key=lambda pair: pair[1].name == script_name)  # the script last: the rest is in place by then
+        for part, target in ready:
+            os.replace(part, target)
+    except Exception as e:
+        return f"{type(e).__name__}: {e}".replace("<", "").replace(">", "")  # the status line is HTML
+    finally:
+        for part, _ in ready:
+            with suppress(OSError):
+                part.unlink()
+    return None
+
+
 def check_for_updates(source: str = "manual", lang: str | None = None, *, lock_acquired: bool = False) -> bool:
     if not lock_acquired and not CONSTANTS.UPDATE_CHECK_LOCK.acquire(blocking=False):
         set_update_status_key("update_status_running", lang=lang)
@@ -887,10 +967,12 @@ def check_for_updates(source: str = "manual", lang: str | None = None, *, lock_a
         VARIABLES.latest_release_url = release_url
 
         if is_newer_version(latest_version, CONSTANTS.VERSION):
+            reason = install_update(latest_version)
             set_update_status_key(
-                "update_status_available",
+                "update_status_available" if reason else "update_status_installed",
                 latest_version=latest_version,
                 version=CONSTANTS.VERSION,
+                reason=reason,
                 lang=lang
             )
         else:
@@ -5143,6 +5225,15 @@ def build_default_hotkey_data(key_name: str, *, alt: bool = False, shift: bool =
     return data_array
 
 
+def build_hotkey_data(bindings: list[dict]):
+    data_array = obs.obs_data_array_create()
+    for binding in bindings:
+        data = obs.obs_data_create_from_json(json.dumps(binding))
+        obs.obs_data_array_push_back(data_array, data)
+        obs.obs_data_release(data)
+    return data_array
+
+
 def load_hotkeys():
     keys = (
         (PN.HK_SAVE_BUFFER_HALF, "[Moment Replays] Save short clip",
@@ -5161,13 +5252,16 @@ def load_hotkeys():
          lambda pressed: mark_moment() if pressed else None)
     )
 
+    saved = load_persisted_settings().get(PERSISTED_HOTKEYS_KEY, {})
     for key_name, key_desc, key_callback in keys:
         key_id = obs.obs_hotkey_register_frontend(key_name, key_desc, key_callback)
         VARIABLES.hotkey_ids.update({key_name: key_id})
         key_data = obs.obs_data_get_array(VARIABLES.script_settings, key_name)
         default = HOTKEY_DEFAULTS.get(key_name)
-        if default and not obs.obs_data_has_user_value(VARIABLES.script_settings, key_name):
-            default_data = build_default_hotkey_data(default[0], **default[1])
+        # OBS has nothing for this key: a new scene collection or a reinstall. The settings file's keys come first.
+        if (key_name in saved or default) and not obs.obs_data_has_user_value(VARIABLES.script_settings, key_name):
+            default_data = (build_hotkey_data(saved[key_name]) if key_name in saved
+                            else build_default_hotkey_data(default[0], **default[1]))
             obs.obs_hotkey_load(key_id, default_data)
             obs.obs_data_array_release(default_data)
         else:
@@ -5248,6 +5342,8 @@ def get_existing_persisted_settings_path() -> Path:
         return CONSTANTS.LEGACY_SETTINGS_PERSIST_PATH
     if CONSTANTS.LEGACY_APP_RULES_PERSIST_PATH.exists():
         return CONSTANTS.LEGACY_APP_RULES_PERSIST_PATH
+    if CONSTANTS.SETTINGS_BACKUP_PATH is not None and CONSTANTS.SETTINGS_BACKUP_PATH.is_file():
+        return CONSTANTS.SETTINGS_BACKUP_PATH  # nothing next to the script: it was reinstalled or its folder is new
     return CONSTANTS.SETTINGS_PERSIST_PATH
 
 
@@ -5309,6 +5405,8 @@ def normalize_default_sound_path(prop_name: str, raw_value: str | None) -> str:
 
     if not value.strip() or value.casefold() in legacy_values_folded:
         return default_value
+    if Path(value).name.casefold() == Path(default_value).name.casefold() and not Path(value).is_file():
+        return default_value  # a bundled sound of a script folder that is gone (settings from the backup)
     return value
 
 
@@ -5412,7 +5510,26 @@ def load_persisted_settings() -> dict[str, Any]:
             except AppRuleParsingError:
                 _print(f"Persisted {PN.PROP_APP_NAME_REPLACEMENTS} at {settings_path} is invalid. Falling back to defaults for this list.")
 
+    raw_hotkeys = payload.get(PERSISTED_HOTKEYS_KEY)
+    if isinstance(raw_hotkeys, dict):
+        persisted_settings[PERSISTED_HOTKEYS_KEY] = {
+            key_name: [binding for binding in bindings if isinstance(binding, dict)]
+            for key_name, bindings in raw_hotkeys.items() if key_name in HOTKEY_NAMES and isinstance(bindings, list)
+        }
+
     return persisted_settings
+
+
+def write_settings_backup(payload: dict[str, Any]) -> None:
+    path = CONSTANTS.SETTINGS_BACKUP_PATH
+    if path is None or payload == VARIABLES.settings_backup_written:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, payload)
+        VARIABLES.settings_backup_written = payload
+    except Exception as e:
+        _print(f"Cannot write the settings backup to {path}: {e}")
 
 
 def save_persisted_settings_from_settings_dict(settings_json: dict) -> None:
@@ -5421,14 +5538,10 @@ def save_persisted_settings_from_settings_dict(settings_json: dict) -> None:
         "version": CONSTANTS.SETTINGS_SCHEMA_VERSION,
     }
 
-    for prop_name, default_value in PERSISTED_STRING_DEFAULTS.items():
-        payload[prop_name] = default_value
-
-    for prop_name, default_value in PERSISTED_BOOL_DEFAULTS.items():
-        payload[prop_name] = default_value
-
-    for prop_name, default_value in PERSISTED_INT_DEFAULTS.items():
-        payload[prop_name] = default_value
+    # OBS lists only what the user changed in it; the rest it shows from this file (script_defaults), so that stays.
+    for defaults in (PERSISTED_STRING_DEFAULTS, PERSISTED_BOOL_DEFAULTS, PERSISTED_INT_DEFAULTS):
+        for prop_name, default_value in defaults.items():
+            payload[prop_name] = persisted_settings.get(prop_name, default_value)
 
     payload[PN.PROP_ALIASES_LIST] = get_default_persisted_list(PN.PROP_ALIASES_LIST)
     payload[PN.PROP_APP_OTHER_NAMES] = get_default_persisted_list(PN.PROP_APP_OTHER_NAMES)
@@ -5475,12 +5588,18 @@ def save_persisted_settings_from_settings_dict(settings_json: dict) -> None:
         (AppRuleParsingError,),
         persisted_settings
     )
+    hotkeys = dict(persisted_settings.get(PERSISTED_HOTKEYS_KEY, {}))
+    for key_name in HOTKEY_NAMES:
+        if isinstance(settings_json.get(key_name), list):  # there since script_save
+            hotkeys[key_name] = settings_json[key_name]
+    payload[PERSISTED_HOTKEYS_KEY] = hotkeys
 
     try:
         write_json_atomic(CONSTANTS.SETTINGS_PERSIST_PATH, payload)
     except Exception:
         _print(f"Cannot write persisted settings to {CONSTANTS.SETTINGS_PERSIST_PATH}.")
         _print(traceback.format_exc())
+    write_settings_backup(payload)
 
 
 def save_persisted_settings_from_obs_data(data, *, allow_when_disabled: bool = False) -> None:
@@ -5584,12 +5703,12 @@ def script_update(settings):
 
 def script_save(settings):
     _print("Saving script...")
-    save_persisted_settings_from_obs_data(settings, allow_when_disabled=True)
     for key_name in VARIABLES.hotkey_ids:
         k = obs.obs_hotkey_save(VARIABLES.hotkey_ids[key_name])
         obs.obs_data_set_array(settings, key_name, k)
         if k is not None:
             obs.obs_data_array_release(k)
+    save_persisted_settings_from_obs_data(settings, allow_when_disabled=True)  # after the keys: the file keeps them too
     _print("Script saved")
 
 
