@@ -1302,7 +1302,7 @@ def setup_clip_paths_settings(group_obj):
     # ----- Callbacks -----
     for prop in folder_props:
         obs.obs_property_set_modified_callback(prop, update_folders_callback)
-    obs.obs_property_set_modified_callback(short_buffer_prop, persist_settings_callback)
+    obs.obs_property_set_modified_callback(short_buffer_prop, persist_slider_callback)
     obs.obs_property_set_modified_callback(other_names_list, update_other_names_callback)
 
 
@@ -1432,7 +1432,7 @@ def setup_notifications_settings(group_obj):
                                  obs.obs_data_get_bool(VARIABLES.script_settings, PN.PROP_NOTIFY_RECORDING_ON_STOP))
 
     # ----- Callbacks ------
-    obs.obs_property_set_modified_callback(volume_prop, persist_settings_callback)
+    obs.obs_property_set_modified_callback(volume_prop, persist_slider_callback)
     obs.obs_property_set_modified_callback(notification_success_prop, update_notifications_menu_callback)
     obs.obs_property_set_modified_callback(notification_failure_prop, update_notifications_menu_callback)
     obs.obs_property_set_modified_callback(recording_start_prop, update_notifications_menu_callback)
@@ -1860,6 +1860,11 @@ def update_name_replacements_callback(p, prop, data):
 def persist_settings_callback(p, prop, data):
     save_persisted_settings_from_obs_data(data)
     return True
+
+
+def persist_slider_callback(p, prop, data):
+    save_persisted_settings_from_obs_data(data)
+    return False  # True rebuilds the panel, which takes the slider out of the user's hand
 
 
 def update_naming_mode_callback(p, prop, data):
