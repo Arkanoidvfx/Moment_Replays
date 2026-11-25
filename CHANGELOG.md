@@ -2,7 +2,7 @@
 
 All notable changes to Moment Replays are documented here.
 
-## Unreleased
+## v1.9
 - **The script updates itself** — when OBS starts it downloads a newer release into its own
   folder, after checking every file's SHA-256, and uses it from the next OBS start. Nothing
   is replaced if a file is damaged or the new script cannot load. Releases before this one
