@@ -2,7 +2,7 @@
 
 All notable changes to Moment Replays are documented here.
 
-## Unreleased
+## v1.8
 - **Sound volume** — a slider and a test button in *Sounds*. The default is 40 %, quieter than
   before; 100 % plays the files at their own volume.
 - **Clip folders** — the panel starts with the one folder most people need and shows where the
@@ -13,6 +13,7 @@ All notable changes to Moment Replays are documented here.
   *Naming rules*.
 - **Folder guide** — [English](FOLDERS.md) and [Russian](FOLDERS.ru.md), with a button in the panel.
 - A links folder that can't be created no longer makes a saved clip count as failed.
+- **Key recording costs less** — 250 checks a second only while the game is in front, 50 otherwise.
 
 ## v1.7
 - **Clip info inside the MP4** — the game, timeline, markers, audio tracks and encoder

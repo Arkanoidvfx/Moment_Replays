@@ -53,7 +53,7 @@ WORKER_THREAD_NAME = "MomentReplays-worker"  # every Thread this script starts; 
 
 
 class CONSTANTS:
-    VERSION = "1.7"
+    VERSION = "1.8"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -86,7 +86,9 @@ class CONSTANTS:
     CLIP_CREATED_LAG_S = 0.25       # replay file created minus clip end, until a key save shows the real value
     SAVE_KEY_MAX_LEAD_S = 5.0       # a save-key press older than this did not cause the file (x264: 1.2 s, AMF: 1.8 s)
     CREATED_MAX_AGE_S = 600.0       # writing a big buffer to a slow disk takes a while; older is not this file
-    KEY_POLL_S = 0.004              # 250 Hz: 1 to 3 % of one core while a game is in front (measured)
+    KEY_POLL_S = 0.004              # 250 Hz while a game is in front
+    KEY_IDLE_S = 0.02               # otherwise: only the window in front and OBS's save key are looked at
+    GAME_CHECK_S = 0.1              # how long the same window keeps its answer to "is it the game"
     KEY_LOG_MAXLEN = 100_000        # press intervals per key
     FILENAME_PROHIBITED_CHARS = r'/\:"<>*?|%'
     PATH_PROHIBITED_CHARS = r'"<>*?|%'
@@ -4855,6 +4857,7 @@ KEY_VKS = {  # the fixed, ordered set of recorded keys (contract: CLIP_INFO.md s
     "SHIFT": 0x10, "CTRL": 0x11, "ALT": 0x12, "SPACE": 0x20, "TAB": 0x09,
     "LMB": 0x01, "RMB": 0x02, "MMB": 0x04, "MB4": 0x05, "MB5": 0x06,
 }
+KEY_CODES = tuple(KEY_VKS.values())
 # Never a game even when fullscreen, whatever the user's Other list says (exe stems, casefolded):
 # typing happens there, so it must not be recorded.
 KEY_NEVER_APPS = frozenset((
@@ -4882,9 +4885,16 @@ class GameInFront:
     def __init__(self):
         self._window = None  # (hwnd, pid) the cached names belong to
         self._exe = self._app = ""
+        self._seen, self._until, self._answer = None, 0.0, False
 
     def __call__(self) -> bool:
-        hwnd = _win_user32.GetForegroundWindow()
+        hwnd, now = _win_user32.GetForegroundWindow(), time.perf_counter()
+        if hwnd != self._seen or now >= self._until:  # another window is looked at at once
+            self._seen, self._until, self._answer = hwnd, now + CONSTANTS.GAME_CHECK_S, False
+            self._answer = self._is_game(hwnd)
+        return self._answer
+
+    def _is_game(self, hwnd) -> bool:
         if not hwnd:
             return False
         pid = wintypes.DWORD()
@@ -4921,7 +4931,7 @@ class KeyRecorder:
     front, plus the last presses of OBS's own save key (to anchor a replay's end; Shift, Ctrl, Alt
     and Win are looked at only while that key is down).
 
-    One thread polls GetAsyncKeyState about 250 times a second; nothing here hooks anything or runs
+    One thread polls GetAsyncKeyState about 250 times a second in the game, 50 elsewhere; nothing here hooks anything or runs
     in the game's process. Key times stay in memory (for the length of the buffer/recording) and leave
     it only inside a clip the user saves; they are never logged. No obspython calls: worker thread.
     """
@@ -4953,15 +4963,15 @@ class KeyRecorder:
             self._thread.join(timeout=2)
 
     def _run(self) -> None:
-        # Event.wait follows the Windows timer: 15.6 ms by default (about 65 polls a second, measured).
         winmm = ctypes.WinDLL("winmm")
-        winmm.timeBeginPeriod(1)
+        self._fast = False
         try:
-            self._poll_until_stopped()
+            self._poll_until_stopped(winmm)
         finally:
-            winmm.timeEndPeriod(1)
+            if self._fast:
+                winmm.timeEndPeriod(1)
 
-    def _poll_until_stopped(self) -> None:
+    def _poll_until_stopped(self, winmm) -> None:
         due = time.perf_counter()
         while not self._stop.is_set():
             try:
@@ -4974,28 +4984,37 @@ class KeyRecorder:
                     self._error_logged = True
                     _print("Key recording: a poll failed; recording continues.")
                     _print(traceback.format_exc())
-            due = max(due + CONSTANTS.KEY_POLL_S, time.perf_counter())
-            self._stop.wait(max(due - time.perf_counter(), 0.001))
+            if self._game != self._fast:
+                # Sleeping follows the Windows timer: 15.6 ms by default, too slow only while keys are recorded.
+                self._fast = self._game
+                (winmm.timeBeginPeriod if self._fast else winmm.timeEndPeriod)(1)
+            now = time.perf_counter()
+            due = max(due + (CONSTANTS.KEY_POLL_S if self._fast else CONSTANTS.KEY_IDLE_S), now)
+            time.sleep(max(due - now, 0.001))  # a fifth of the price of Event.wait
 
     # --- polling ---
     def poll(self, now: float) -> None:
-        cache: dict[int, int] = {}
+        """About 250 times a second in the game: the loops over the keys run only when one is down or was tapped."""
+        game = False
+        if VARIABLES.record_inputs:
+            with suppress(Exception):  # any doubt: record nothing
+                game = bool(self._game_in_front())
+        states = list(map(self._key_state, KEY_CODES)) if game else None
+        if VARIABLES.save_key_bindings or self._save_bindings:
+            # One GetAsyncKeyState call per key per poll: it clears the low bit.
+            cache = dict(zip(KEY_CODES, states)) if game else {}
 
-        def read(vk: int) -> int:  # one GetAsyncKeyState call per key per poll: it clears the low bit
-            if vk not in cache:
-                cache[vk] = self._key_state(vk)
-            return cache[vk]
+            def read(vk: int) -> int:
+                if vk not in cache:
+                    cache[vk] = self._key_state(vk)
+                return cache[vk]
 
-        self._poll_save_keys(now, read)
+            self._poll_save_keys(now, read)
         if not VARIABLES.record_inputs:
             self._forget()
             return
-        try:
-            game = bool(self._game_in_front())
-        except Exception:
-            game = False  # any doubt: record nothing
         with self._lock:
-            self._poll_keys(now, game, read)
+            self._poll_keys(now, states)
             self._polls += 1
             if self._polls % 250 == 0:  # about once a second
                 self._trim(now)
@@ -5021,22 +5040,22 @@ class KeyRecorder:
             elif match and not changed:  # pressed and released between two polls
                 VARIABLES.save_key_presses.append(now)
 
-    def _poll_keys(self, now: float, game: bool, read) -> None:
-        if not game:
+    def _poll_keys(self, now: float, states: list | None) -> None:
+        if states is None:
             self._release(now)
             return
         prime = not self._game  # just came to the front: presses before this moment don't count
         if prime:
             self._game = True
             self._focus.append([now, None])
-        for name, vk in KEY_VKS.items():
-            state = read(vk)
-            if state & 0x8000:
-                self._open.setdefault(name, now)
-            elif name in self._open:
-                self._closed[name].append((self._open.pop(name), now))
-            elif state & 1 and not prime:  # pressed and released between two polls
-                self._closed[name].append((max(self._last_poll, now - 2 * CONSTANTS.KEY_POLL_S), now))
+        if self._open or any(states):
+            for name, state in zip(KEY_VKS, states):
+                if state & 0x8000:
+                    self._open.setdefault(name, now)
+                elif name in self._open:
+                    self._closed[name].append((self._open.pop(name), now))
+                elif state & 1 and not prime:  # pressed and released between two polls
+                    self._closed[name].append((max(self._last_poll, now - 2 * CONSTANTS.KEY_POLL_S), now))
         self._last_poll = now
 
     def _release(self, now: float) -> None:
