@@ -2,6 +2,10 @@
 
 All notable changes to Moment Replays are documented here.
 
+## v1.11
+- *Check for updates* shows how the check ended (up to date, installed, available and why not,
+  or failed) right after the press, instead of "Checking for updates..." until the panel was reopened.
+
 ## v1.10
 - **Six languages** — the panel, the hotkey names in OBS and the status texts are in English,
   Russian, Simplified Chinese (Mandarin), Cantonese (traditional characters), Hindi and Japanese.

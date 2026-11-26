@@ -53,7 +53,7 @@ WORKER_THREAD_NAME = "MomentReplays-worker"  # every Thread this script starts; 
 
 
 class CONSTANTS:
-    VERSION = "1.10"
+    VERSION = "1.11"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
