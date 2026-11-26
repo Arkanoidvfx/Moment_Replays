@@ -121,6 +121,7 @@ class CONSTANTS:
     }
     GITHUB_LATEST_RELEASE_API_URL = "https://api.github.com/repos/Arkanoidvfx/Moment_Replays/releases/latest"
     UPDATE_CHECK_TIMEOUT = 5
+    UPDATE_BUTTON_WAIT = 20  # seconds the Check for updates button waits for the check's answer
     # Self-update: files of the latest release, named and hashed by its SHA256.json (release.ps1 makes it).
     UPDATE_SCRIPT_NAME = "Moment_Replays.py"
     UPDATE_HASHES_NAME = "SHA256.json"
@@ -223,9 +224,7 @@ class VARIABLES:
     other_obs_error_logged = False
     sidecar_persist_enabled = False
     settings_backup_written = None
-    update_check_in_progress = False
-    update_status_props = None
-    update_status_refresh_timer_active = False
+    update_check_thread: Thread | None = None
     latest_release_url = CONSTANTS.GITHUB_LATEST_RELEASE_URL
     update_status_text = ""
     update_status_key = "update_status_initial"
@@ -1802,7 +1801,6 @@ def check_for_updates(source: str = "manual", lang: str | None = None, *, lock_a
         set_update_status_key("update_status_running", lang=lang)
         return False
 
-    VARIABLES.update_check_in_progress = True
     try:
         # start_update_check_thread() already logged "Checking..." before handing over the lock.
         set_update_status_key("update_status_checking", version=CONSTANTS.VERSION, lang=lang,
@@ -1838,35 +1836,25 @@ def check_for_updates(source: str = "manual", lang: str | None = None, *, lock_a
         set_update_status_key("update_status_failed", error=e, lang=lang)
         return False
     finally:
-        VARIABLES.update_check_in_progress = False
         with suppress(RuntimeError):
             CONSTANTS.UPDATE_CHECK_LOCK.release()
 
 
-def start_update_check_thread(source: str = "automatic", props=None) -> bool:
+def start_update_check_thread(source: str = "automatic") -> bool:
     lang = get_ui_language()
-    if props is not None:
-        VARIABLES.update_status_props = props
-
     if not CONSTANTS.UPDATE_CHECK_LOCK.acquire(blocking=False):
         set_update_status_key("update_status_running", lang=lang)
-        if props is not None:
-            update_update_status_property(props)
         return False
 
-    VARIABLES.update_check_in_progress = True
     set_update_status_key("update_status_checking", version=CONSTANTS.VERSION, lang=lang)
-    if props is not None:
-        update_update_status_property(props)
-        schedule_update_status_refresh(props)
-
     try:
-        Thread(target=check_for_updates, args=(source, lang), kwargs={"lock_acquired": True}, daemon=True,
-               name=WORKER_THREAD_NAME).start()
+        worker = Thread(target=check_for_updates, args=(source, lang), kwargs={"lock_acquired": True}, daemon=True,
+                        name=WORKER_THREAD_NAME)
+        worker.start()
+        VARIABLES.update_check_thread = worker  # only a started thread: the button joins it
     except Exception:
         set_update_status_key("update_status_thread_failed", lang=lang)
         _print(traceback.format_exc())
-        VARIABLES.update_check_in_progress = False
         with suppress(RuntimeError):
             CONSTANTS.UPDATE_CHECK_LOCK.release()
         return False
@@ -2518,29 +2506,17 @@ def update_update_status_property(props) -> None:
         obs.obs_property_set_description(status_text, get_update_status_text())
 
 
-def update_status_refresh_timer_callback() -> None:
-    props = VARIABLES.update_status_props
-    if props is not None:
-        update_update_status_property(props)
-
-    if not VARIABLES.update_check_in_progress:
-        VARIABLES.update_status_refresh_timer_active = False
-        VARIABLES.update_status_props = None
-        obs.timer_remove(update_status_refresh_timer_callback)
-
-
-def schedule_update_status_refresh(props) -> None:
-    VARIABLES.update_status_props = props
-    if VARIABLES.update_status_refresh_timer_active:
-        return
-
-    VARIABLES.update_status_refresh_timer_active = True
-    obs.timer_add(update_status_refresh_timer_callback, 250)
-
-
 def check_updates_callback(*args):
     props = args[0] if args else None
-    start_update_check_thread("button", props=props)
+    start_update_check_thread("button")
+    # OBS redraws a script's panel only when a callback returns True, never from a timer: wait for the
+    # answer here (this check's, or the start-up one still running), so the panel shows how it ended.
+    worker = VARIABLES.update_check_thread
+    if worker is not None:
+        worker.join(CONSTANTS.UPDATE_BUTTON_WAIT)
+    flush_deferred_logs()
+    if props is not None:
+        update_update_status_property(props)
     return True
 
 
@@ -6528,9 +6504,6 @@ def script_unload():
         with suppress(Exception):
             VARIABLES.luma_sampler.destroy()
         VARIABLES.luma_sampler = None
-    obs.timer_remove(update_status_refresh_timer_callback)
-    VARIABLES.update_status_refresh_timer_active = False
-    VARIABLES.update_status_props = None
     if VARIABLES.clip_exe_history is not None:
         VARIABLES.clip_exe_history.clear()
     VARIABLES.clip_exe_counts = {}
