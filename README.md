@@ -3,7 +3,7 @@
 An OBS Studio script for flexible replay-buffer clip management on Windows.
 It automatically renames and sorts your saved replay clips — by the app or
 scene you were in — and adds path/`.exe` naming rules, sound notifications,
-short clips, hard links, and a bilingual (English / Russian) settings UI.
+short clips, hard links, and a settings UI in six languages.
 
 > **Windows only.** The script uses Win32 APIs to detect the active application.
 
@@ -36,7 +36,8 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
   clip. Off by default; see below.
 - **Mark moment** — a hotkey that marks the current moment; the next saved clip
   carries it as an annotation.
-- **Bilingual UI** — English / Russian, switchable in the script settings.
+- **Six languages** — English, Russian, Simplified Chinese (Mandarin), Cantonese (traditional
+  characters), Hindi and Japanese, switchable in the script settings; hotkey names follow.
 - **Updates itself** from GitHub releases; the new version starts with the next OBS start.
 
 ## Requirements
@@ -49,7 +50,7 @@ short clips, hard links, and a bilingual (English / Russian) settings UI.
 
 ## Installation
 
-1. Download `Moment_Replays.py` together with the bundled `*.wav` sound files
+1. Download `Moment_Replays.py` together with the bundled `*.wav` sound files and `Moment_Input_Overlay.png`
    (keep them in the same folder).
 2. In OBS: **Tools → Scripts**.
 3. On the **Python Settings** tab, point OBS to a Python install if prompted.

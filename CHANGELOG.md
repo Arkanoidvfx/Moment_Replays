@@ -2,6 +2,12 @@
 
 All notable changes to Moment Replays are documented here.
 
+## v1.10
+- **Six languages** — the panel, the hotkey names in OBS and the status texts are in English,
+  Russian, Simplified Chinese (Mandarin), Cantonese (traditional characters), Hindi and Japanese.
+  Hotkey names follow the panel's language; the keys you set stay.
+- *Record key presses* shows a picture of the keys as Moment Player draws them over a clip.
+
 ## v1.9
 - **The script updates itself** — when OBS starts it downloads a newer release into its own
   folder, after checking every file's SHA-256, and uses it from the next OBS start. Nothing

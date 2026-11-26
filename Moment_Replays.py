@@ -53,7 +53,7 @@ WORKER_THREAD_NAME = "MomentReplays-worker"  # every Thread this script starts; 
 
 
 class CONSTANTS:
-    VERSION = "1.9"
+    VERSION = "1.10"
     OBS_VERSION_STRING = obs.obs_get_version_string()
     OBS_VERSION_RE = re.compile(r'(\d+)\.(\d+)\.(\d+)')
     OBS_VERSION = [int(i) for i in OBS_VERSION_RE.match(OBS_VERSION_STRING).groups()]
@@ -104,6 +104,7 @@ class CONSTANTS:
     DEFAULT_FAILURE_SOUND_PATH = SCRIPT_DIR / "Replay_Failed.wav"
     DEFAULT_RECORDING_START_SOUND_PATH = SCRIPT_DIR / "Recording_Started.wav"
     DEFAULT_RECORDING_STOP_SOUND_PATH = SCRIPT_DIR / "Recording_Stoped.wav"
+    INPUT_OVERLAY_PICTURE = SCRIPT_DIR / "Moment_Input_Overlay.png"  # shown under "Record key presses"
     SETTINGS_PERSIST_PATH = Path(__file__).with_name("Moment_Replays.settings.json")
     LEGACY_SETTINGS_PERSIST_PATH = Path(__file__).with_name("arkanoid_replays.settings.json")
     # A second copy outside the script folder: a new or wiped script folder starts from it.
@@ -428,6 +429,16 @@ LEGACY_DEFAULT_SOUND_PATHS = {
 }
 
 
+# The codes are saved in settings and come from the installer too: never rename one.
+UI_LANGUAGES = {
+    "en": "English",
+    "ru": "Русский",
+    "zh-CN": "简体中文（普通话）",
+    "zh-HK": "廣東話（繁體）",
+    "hi": "हिन्दी",
+    "ja": "日本語",
+}
+
 UI_TEXT = {
     "en": {
         "script_description_summary": (
@@ -588,6 +599,39 @@ UI_TEXT = {
             "inside every clip and recording you save and travel with it: anyone who gets the clip can see them. "
             "Off by default."
         ),
+        "update_reason_git": "this folder is a git checkout",
+        "update_reason_renamed": "the script file was renamed",
+        "update_reason_tag": "unexpected release tag",
+        "update_reason_list": "the release has no valid file list",
+        "update_reason_damaged": "{name} was damaged on the way",
+        "hotkey_save_buffer_half": "Save short clip",
+        "hotkey_save_buffer_override_folder": "Save buffer (override folder)",
+        "hotkey_open_last_video": "Open last saved video",
+        "hotkey_record_alternative_folder": "Start/stop recording (alternative folder)",
+        "hotkey_mark_moment": "Mark moment",
+        "variable_example": "Example",
+        "variable_%NAME": "name of the clip.",
+        "variable_%a": "Weekday as locale’s abbreviated name.",
+        "variable_%A": "Weekday as locale’s full name.",
+        "variable_%w": "Weekday as a decimal number, where 0 is Sunday and 6 is Saturday.",
+        "variable_%d": "Day of the month as a zero-padded decimal number.",
+        "variable_%b": "Month as locale’s abbreviated name.",
+        "variable_%B": "Month as locale’s full name.",
+        "variable_%m": "Month as a zero-padded decimal number.",
+        "variable_%y": "Year without century as a zero-padded decimal number.",
+        "variable_%Y": "Year with century as a decimal number.",
+        "variable_%H": "Hour (24-hour clock) as a zero-padded decimal number.",
+        "variable_%I": "Hour (12-hour clock) as a zero-padded decimal number.",
+        "variable_%p": "Locale’s equivalent of either AM or PM.",
+        "variable_%M": "Minute as a zero-padded decimal number.",
+        "variable_%S": "Second as a zero-padded decimal number.",
+        "variable_%f": "Microsecond as a decimal number, zero-padded to 6 digits.",
+        "variable_%z": "UTC offset in the form ±HHMM[SS[.ffffff]]",
+        "variable_%Z": "Time zone name",
+        "variable_%j": "Day of the year as a zero-padded decimal number.",
+        "variable_%U": "Week number of the year (Sunday as the first day of the week) as a zero-padded decimal number. All days in a new year preceding the first Sunday are considered to be in week 0.",
+        "variable_%W": "Week number of the year (Monday as the first day of the week) as a zero-padded decimal number. All days in a new year preceding the first Monday are considered to be in week 0.",
+        "variable_%%": "A literal '%' character.",
     },
     "ru": {
         "script_description_summary": (
@@ -622,16 +666,16 @@ UI_TEXT = {
         "show_override_folder_settings": "Дополнительные хоткеи: вторая папка, короткий клип, отдельные записи",
         "override_folder": "Вторая папка клипов",
         "override_folder_desc": (
-            "Для хоткея «Save buffer (override folder)». "
+            "Для хоткея «Сохранить повтор (вторая папка)». "
             "Тот же диск, что и записи OBS. Пусто: папка клипов."
         ),
         "recording_folder": "Папка записей",
         "recording_folder_desc": (
-            "Для хоткея «Start/stop recording (alternative folder)». Любой диск. Пусто: папка клипов."
+            "Для хоткея «Начать/остановить запись (папка записей)». Любой диск. Пусто: папка клипов."
         ),
         "short_clip_duration": "Короткий клип",
         "short_clip_duration_desc": (
-            "Хоткей «Save short clip» оставляет конец повтора. "
+            "Хоткей «Сохранить короткий клип» оставляет конец повтора. "
             "40% от 1 минуты = 24 секунды. Нужен ffmpeg в PATH."
         ),
         "create_hard_links": "Собирать все клипы ещё и в одной папке",
@@ -749,6 +793,806 @@ UI_TEXT = {
             "сохранённого клипа и записи и передаётся вместе с ними: его увидит каждый, кому вы отправите клип. "
             "По умолчанию выключено."
         ),
+        "update_reason_git": "эта папка - рабочая копия git",
+        "update_reason_renamed": "файл скрипта переименован",
+        "update_reason_tag": "неожиданный тег релиза",
+        "update_reason_list": "в релизе нет правильного списка файлов",
+        "update_reason_damaged": "{name} повреждён при загрузке",
+        "hotkey_save_buffer_half": "Сохранить короткий клип",
+        "hotkey_save_buffer_override_folder": "Сохранить повтор (вторая папка)",
+        "hotkey_open_last_video": "Открыть последнее сохранённое видео",
+        "hotkey_record_alternative_folder": "Начать/остановить запись (папка записей)",
+        "hotkey_mark_moment": "Отметить момент",
+        "variable_example": "Пример",
+        "variable_%NAME": "имя клипа.",
+        "variable_%a": "сокращенное название дня недели по локали.",
+        "variable_%A": "полное название дня недели по локали.",
+        "variable_%w": "день недели числом, где 0 — воскресенье, 6 — суббота.",
+        "variable_%d": "день месяца двумя цифрами.",
+        "variable_%b": "сокращенное название месяца по локали.",
+        "variable_%B": "полное название месяца по локали.",
+        "variable_%m": "месяц двумя цифрами.",
+        "variable_%y": "год без века двумя цифрами.",
+        "variable_%Y": "год полностью.",
+        "variable_%H": "час в 24-часовом формате двумя цифрами.",
+        "variable_%I": "час в 12-часовом формате двумя цифрами.",
+        "variable_%p": "AM или PM по локали.",
+        "variable_%M": "минуты двумя цифрами.",
+        "variable_%S": "секунды двумя цифрами.",
+        "variable_%f": "микросекунды, 6 цифр.",
+        "variable_%z": "UTC-смещение в формате ±HHMM[SS[.ffffff]].",
+        "variable_%Z": "название часового пояса.",
+        "variable_%j": "день года тремя цифрами.",
+        "variable_%U": "номер недели года, если неделя начинается в воскресенье.",
+        "variable_%W": "номер недели года, если неделя начинается в понедельник.",
+        "variable_%%": "символ %.",
+    },
+    "zh-CN": {
+        "script_description_summary": (
+            "按应用或场景名称保存回放片段，支持路径和 .exe 命名规则、Other 文件夹、提示音、短片段、"
+            "Game/Desktop 场景自动切换、供 Moment Player 使用的片段信息，以及检查更新。"
+        ),
+        "interface_language": "界面语言",
+        "hotkey_settings_tip": "所有快捷键都可以在 OBS 的“设置 -> 快捷键”中更改。",
+        "group_clip_paths": "片段文件夹",
+        "group_clip_naming": "片段命名",
+        "group_sound_notifications": "声音",
+        "group_app_naming_rules": "命名规则",
+        "group_updates": "更新",
+        "base_folder": "片段文件夹",
+        "next_clip": "下一个片段：<b>{path}</b>",
+        "next_clip_other": "“{other_folder}”列表中的应用：<b>{path}</b>",
+        "next_clip_game": "游戏",
+        "next_clip_scene": "场景",
+        "folders_ok": "已检查所有文件夹，没有问题。",
+        "folder_not_found": "找不到 <b>{path}</b>。请连接磁盘或选择其他文件夹。",
+        "folder_not_writable": "无法写入 <b>{path}</b>。请选择其他文件夹。",
+        "folder_wrong_drive": (
+            "磁盘不对：OBS 录制到 {drive}，所以 <b>{path}</b> 也必须在 {drive} 上。"
+            "请选择 {drive} 上的文件夹，或在 OBS 中更改录像路径。"
+        ),
+        "clips_stay_in_obs_folder": "在此之前，片段会留在 OBS 的录像文件夹。",
+        "use_obs_folder": "使用 OBS 的录像文件夹",
+        "check_folders": "检查文件夹",
+        "folder_guide": "文件夹设置指南",
+        "show_more_folders": "更多文件夹",
+        "show_override_folder_settings": "额外快捷键：第二文件夹、短片段、单独录制",
+        "override_folder": "第二片段文件夹",
+        "override_folder_desc": (
+            "用于“保存回放（第二文件夹）”快捷键。"
+            "必须与 OBS 录像在同一磁盘。留空：使用片段文件夹。"
+        ),
+        "recording_folder": "录像文件夹",
+        "recording_folder_desc": "用于“开始/停止录制（录像文件夹）”快捷键。可在任意磁盘。留空：使用片段文件夹。",
+        "short_clip_duration": "短片段",
+        "short_clip_duration_desc": (
+            "“保存短片段”快捷键只保留回放的最后一部分。"
+            "1 分钟的 40% = 24 秒。需要 PATH 中有 ffmpeg。"
+        ),
+        "create_hard_links": "同时把所有片段汇集到一个文件夹",
+        "links_folder": "汇总文件夹",
+        "links_folder_desc": (
+            "保存到片段文件夹的每个片段也会出现在这里，不占用额外空间（硬链接）。"
+            "必须与 OBS 录像在同一磁盘。"
+        ),
+        "clip_name": "片段名称",
+        "clip_name_active_app": "保存时的活动应用",
+        "clip_name_most_recorded_app": "回放中活动时间最长的应用",
+        "clip_name_current_scene": "当前场景",
+        "file_name": "文件名",
+        "invalid_file_name_format": "<font color=\"red\"><pre> 文件名格式无效。</pre></font>",
+        "sound_volume": "音量",
+        "test_sound": "播放测试音",
+        "play_on_success": "保存成功时播放声音",
+        "play_on_success_path": "成功提示音",
+        "play_on_failure": "保存失败时播放声音",
+        "play_on_failure_path": "失败提示音",
+        "play_recording_start": "开始录制时播放声音",
+        "play_recording_start_path": "开始录制提示音",
+        "play_recording_stop": "停止录制时播放声音",
+        "play_recording_stop_path": "停止录制提示音",
+        "import_rules_file": "规则导入文件",
+        "export_rules_folder": "规则导出文件夹",
+        "path_specific_names_desc": (
+            "<b>按路径命名</b><br/>"
+            "为某个 .exe 的完整路径或上级文件夹指定片段名称。"
+        ),
+        "alias_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">路径或片段名称中有无效字符。</span><br/>"
+            "<span style=\"color: orange\">片段名称不能包含 "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code>。<br/>"
+            "路径不能包含 <code>&lt; &gt; | * ? \" %</code>。</span>"
+            "</div>"
+        ),
+        "alias_path_exists": "<div style=\"font-size: 13px; color: red\">此路径已在列表中。</div>",
+        "alias_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">规则格式无效。</span><br/>"
+            "<span style=\"color: orange\">格式：盘符:\\文件夹或程序的路径 &gt; 片段名称</span><br/>"
+            "<span style=\"color: lightgreen\">示例：C:\\Program Files\\Minecraft &gt; Minecraft</span>"
+            "</div>"
+        ),
+        "aliases_format_desc": (
+            "格式：盘符:\\文件夹或程序的路径 > 片段名称\n"
+            "适用于启动器、同名 .exe 或整个文件夹的规则。\n"
+            "示例：{python_exe} > OBS"
+        ),
+        "import_path_specific_names": "导入按路径命名的规则",
+        "export_path_specific_names": "导出按路径命名的规则",
+        "exe_name_fixes_desc": (
+            "<b>.exe 名称修正</b>"
+        ),
+        "replacement_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">应用名称替换中有无效字符。</span><br/>"
+            "<span style=\"color: orange\">新名称不能包含 "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code>。</span>"
+            "</div>"
+        ),
+        "replacement_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">替换格式无效。</span><br/>"
+            "<span style=\"color: orange\">格式：原名称 &gt; 新名称</span><br/>"
+            "<span style=\"color: lightgreen\">示例：TslGame &gt; PUBG</span>"
+            "</div>"
+        ),
+        "replacement_format_desc": "原 .exe 名称 > 片段名称",
+        "other_names_invalid": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">只能填写应用名称。</span><br/>"
+            "<span style=\"color: orange\">不能有路径，也不能有 <code>&gt; / \\ :</code> 之类的分隔符。</span>"
+            "</div>"
+        ),
+        "apps_saved_to_other": "保存到“{other_folder}”文件夹的应用",
+        "other_names_desc": "与最终片段名称完全一致，不区分大小写。示例：chrome",
+        "check_updates": "检查更新",
+        "open_latest_release": "打开最新版本页面",
+        "update_status_initial": "当前版本：{version}。尚未检查更新。",
+        "update_status_running": "正在检查更新，请稍候。",
+        "update_status_checking": (
+            "正在检查更新...<br/>"
+            "当前版本：<span style=\"font-size: 1.2em;\"><b>{version}</b></span>"
+        ),
+        "update_status_available": (
+            "有可用的更新：{latest_version}（当前：{version}）。未能自动安装：{reason}。"
+            "请打开最新版本页面手动更新。"
+        ),
+        "update_status_installed": "已安装版本 {latest_version}（正在运行：{version}）。重启 OBS 后生效。",
+        "update_status_current": "当前版本 {version} 已是最新。最新发布：{latest_version}。",
+        "update_status_no_release": "GitHub 上还没有发布版本。当前版本：{version}。",
+        "update_status_http_error": "检查更新失败：GitHub 返回 HTTP {code}。",
+        "update_status_failed": "检查更新失败：{error}",
+        "update_status_thread_failed": "无法启动更新检查线程。",
+        "update_reason_git": "此文件夹是 git 工作副本",
+        "update_reason_renamed": "脚本文件已被重命名",
+        "update_reason_tag": "版本标签异常",
+        "update_reason_list": "该版本没有有效的文件列表",
+        "update_reason_damaged": "{name} 在下载时损坏",
+        "group_moments": "精彩时刻",
+        "auto_scene_enabled": "自动切换 Game / Desktop 场景",
+        "auto_scene_desc": (
+            "当“{source}”捕获到全屏游戏时显示场景“{game}”，否则显示“{desktop}”。"
+            "两个场景和游戏采集来源都存在时才会工作；有另一个 OBS 在运行时会暂停，以免抢走它的游戏采集。"
+        ),
+        "write_moment_metadata": "把片段信息保存在片段内",
+        "write_moment_metadata_desc": (
+            "游戏、应用时间线、“标记时刻”的标记、音轨和编码器设置，供 Moment Player 使用，"
+            "直接保存在 MP4 中（synopsis 标签）。如果无法写入（其他容器格式或特殊的 MP4），"
+            "则在片段旁边保存 .moment.json 文件。"
+        ),
+        "record_inputs": "记录按键（在 Moment Player 中显示在片段上）",
+        "record_inputs_desc": (
+            "只记录按下 1-5、Q W E R T、A S D F G、Z X C V、Shift、Ctrl、Alt、Space、Tab 和鼠标按键的时间，"
+            "不记录其他内容，并且仅在游戏窗口位于前台时记录。按键时间保存在您存下的每个片段和录像中，"
+            "并随文件一起传播：收到片段的人都能看到。默认关闭。"
+        ),
+        "hotkey_save_buffer_half": "保存短片段",
+        "hotkey_save_buffer_override_folder": "保存回放（第二文件夹）",
+        "hotkey_open_last_video": "打开最近保存的视频",
+        "hotkey_record_alternative_folder": "开始/停止录制（录像文件夹）",
+        "hotkey_mark_moment": "标记时刻",
+        "variable_example": "示例",
+        "variable_%NAME": "片段名称。",
+        "variable_%a": "星期的缩写（按区域设置）。",
+        "variable_%A": "星期的全称（按区域设置）。",
+        "variable_%w": "用数字表示的星期，0 是星期日，6 是星期六。",
+        "variable_%d": "日期，两位数。",
+        "variable_%b": "月份的缩写（按区域设置）。",
+        "variable_%B": "月份的全称（按区域设置）。",
+        "variable_%m": "月份，两位数。",
+        "variable_%y": "年份的后两位。",
+        "variable_%Y": "完整年份。",
+        "variable_%H": "小时（24 小时制），两位数。",
+        "variable_%I": "小时（12 小时制），两位数。",
+        "variable_%p": "上午或下午（按区域设置）。",
+        "variable_%M": "分钟，两位数。",
+        "variable_%S": "秒，两位数。",
+        "variable_%f": "微秒，六位数。",
+        "variable_%z": "UTC 偏移，格式为 ±HHMM[SS[.ffffff]]。",
+        "variable_%Z": "时区名称。",
+        "variable_%j": "一年中的第几天，三位数。",
+        "variable_%U": "一年中的第几周（星期日为一周的第一天）。",
+        "variable_%W": "一年中的第几周（星期一为一周的第一天）。",
+        "variable_%%": "字符 %。",
+    },
+    "zh-HK": {
+        "script_description_summary": (
+            "用應用程式或者場景名儲存重播片段，有路徑同 .exe 命名規則、Other 資料夾、提示音、短片段、"
+            "Game/Desktop 場景自動切換、畀 Moment Player 用嘅片段資料，同埋檢查更新。"
+        ),
+        "interface_language": "介面語言",
+        "hotkey_settings_tip": "所有快捷鍵都可以喺 OBS 嘅「設定 -> 快捷鍵」度改。",
+        "group_clip_paths": "片段資料夾",
+        "group_clip_naming": "片段命名",
+        "group_sound_notifications": "聲音",
+        "group_app_naming_rules": "命名規則",
+        "group_updates": "更新",
+        "base_folder": "片段資料夾",
+        "next_clip": "下一條片段：<b>{path}</b>",
+        "next_clip_other": "「{other_folder}」清單入面嘅應用程式：<b>{path}</b>",
+        "next_clip_game": "遊戲",
+        "next_clip_scene": "場景",
+        "folders_ok": "所有資料夾都檢查過，冇問題。",
+        "folder_not_found": "搵唔到 <b>{path}</b>。請駁返個磁碟或者揀第二個資料夾。",
+        "folder_not_writable": "寫唔到入 <b>{path}</b>。請揀第二個資料夾。",
+        "folder_wrong_drive": (
+            "磁碟唔啱：OBS 錄去 {drive}，所以 <b>{path}</b> 都要喺 {drive}。"
+            "請揀 {drive} 入面嘅資料夾，或者喺 OBS 改錄影路徑。"
+        ),
+        "clips_stay_in_obs_folder": "未搞掂之前，片段會留喺 OBS 嘅錄影資料夾。",
+        "use_obs_folder": "用 OBS 嘅錄影資料夾",
+        "check_folders": "檢查資料夾",
+        "folder_guide": "資料夾設定教學",
+        "show_more_folders": "更多資料夾",
+        "show_override_folder_settings": "額外快捷鍵：第二個資料夾、短片段、獨立錄影",
+        "override_folder": "第二個片段資料夾",
+        "override_folder_desc": (
+            "「儲存重播（第二個資料夾）」快捷鍵會用到。"
+            "要同 OBS 錄影喺同一個磁碟。留空：用片段資料夾。"
+        ),
+        "recording_folder": "錄影資料夾",
+        "recording_folder_desc": "「開始/停止錄影（錄影資料夾）」快捷鍵會用到。邊個磁碟都得。留空：用片段資料夾。",
+        "short_clip_duration": "短片段",
+        "short_clip_duration_desc": (
+            "「儲存短片段」快捷鍵淨係留低重播最後嗰段。"
+            "1 分鐘嘅 40% = 24 秒。PATH 入面要有 ffmpeg。"
+        ),
+        "create_hard_links": "同時將所有片段集中喺一個資料夾",
+        "links_folder": "集中資料夾",
+        "links_folder_desc": (
+            "存入片段資料夾嘅每條片段都會喺呢度出現，唔會佔多咗位（硬連結）。"
+            "要同 OBS 錄影喺同一個磁碟。"
+        ),
+        "clip_name": "片段名",
+        "clip_name_active_app": "儲存嗰刻用緊嘅應用程式",
+        "clip_name_most_recorded_app": "重播入面用得最耐嘅應用程式",
+        "clip_name_current_scene": "而家嘅場景",
+        "file_name": "檔案名",
+        "invalid_file_name_format": "<font color=\"red\"><pre> 檔案名格式唔啱。</pre></font>",
+        "sound_volume": "音量",
+        "test_sound": "播測試聲",
+        "play_on_success": "儲存成功嗰陣播提示音",
+        "play_on_success_path": "成功提示音",
+        "play_on_failure": "儲存失敗嗰陣播提示音",
+        "play_on_failure_path": "失敗提示音",
+        "play_recording_start": "開始錄影嗰陣播提示音",
+        "play_recording_start_path": "開始錄影提示音",
+        "play_recording_stop": "停止錄影嗰陣播提示音",
+        "play_recording_stop_path": "停止錄影提示音",
+        "import_rules_file": "規則匯入檔案",
+        "export_rules_folder": "規則匯出資料夾",
+        "path_specific_names_desc": (
+            "<b>按路徑命名</b><br/>"
+            "幫某個 .exe 嘅完整路徑或者上層資料夾指定片段名。"
+        ),
+        "alias_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">路徑或者片段名有唔用得嘅字元。</span><br/>"
+            "<span style=\"color: orange\">片段名唔可以有 "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code>。<br/>"
+            "路徑唔可以有 <code>&lt; &gt; | * ? \" %</code>。</span>"
+            "</div>"
+        ),
+        "alias_path_exists": "<div style=\"font-size: 13px; color: red\">呢個路徑已經喺清單入面。</div>",
+        "alias_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">規則格式唔啱。</span><br/>"
+            "<span style=\"color: orange\">格式：磁碟:\\資料夾或者程式嘅路徑 &gt; 片段名</span><br/>"
+            "<span style=\"color: lightgreen\">例子：C:\\Program Files\\Minecraft &gt; Minecraft</span>"
+            "</div>"
+        ),
+        "aliases_format_desc": (
+            "格式：磁碟:\\資料夾或者程式嘅路徑 > 片段名\n"
+            "啱用喺啟動器、同名 .exe 或者成個資料夾嘅規則。\n"
+            "例子：{python_exe} > OBS"
+        ),
+        "import_path_specific_names": "匯入按路徑命名嘅規則",
+        "export_path_specific_names": "匯出按路徑命名嘅規則",
+        "exe_name_fixes_desc": (
+            "<b>.exe 名修正</b>"
+        ),
+        "replacement_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">應用程式名替換入面有唔用得嘅字元。</span><br/>"
+            "<span style=\"color: orange\">新名唔可以有 "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code>。</span>"
+            "</div>"
+        ),
+        "replacement_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">替換格式唔啱。</span><br/>"
+            "<span style=\"color: orange\">格式：原名 &gt; 新名</span><br/>"
+            "<span style=\"color: lightgreen\">例子：TslGame &gt; PUBG</span>"
+            "</div>"
+        ),
+        "replacement_format_desc": "原本 .exe 名 > 片段名",
+        "other_names_invalid": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">淨係可以填應用程式名。</span><br/>"
+            "<span style=\"color: orange\">唔好有路徑，亦唔好有 <code>&gt; / \\ :</code> 呢類分隔符。</span>"
+            "</div>"
+        ),
+        "apps_saved_to_other": "存入「{other_folder}」資料夾嘅應用程式",
+        "other_names_desc": "要同最終片段名一模一樣，唔分大細楷。例子：chrome",
+        "check_updates": "檢查更新",
+        "open_latest_release": "開最新版本頁面",
+        "update_status_initial": "而家嘅版本：{version}。仲未檢查更新。",
+        "update_status_running": "已經檢查緊更新。",
+        "update_status_checking": (
+            "檢查緊更新...<br/>"
+            "而家嘅版本：<span style=\"font-size: 1.2em;\"><b>{version}</b></span>"
+        ),
+        "update_status_available": (
+            "有更新：{latest_version}（而家：{version}）。冇自動安裝到：{reason}。"
+            "請開最新版本頁面自己更新。"
+        ),
+        "update_status_installed": "已經裝咗版本 {latest_version}（而家行緊：{version}）。重新啟動 OBS 就會用到。",
+        "update_status_current": "版本 {version} 已經係最新。最新發佈：{latest_version}。",
+        "update_status_no_release": "GitHub 上面仲未有發佈版本。而家嘅版本：{version}。",
+        "update_status_http_error": "檢查更新失敗：GitHub 回應 HTTP {code}。",
+        "update_status_failed": "檢查更新失敗：{error}",
+        "update_status_thread_failed": "開唔到檢查更新嘅執行緒。",
+        "update_reason_git": "呢個資料夾係 git 工作副本",
+        "update_reason_renamed": "腳本檔案改咗名",
+        "update_reason_tag": "版本標籤唔正常",
+        "update_reason_list": "呢個版本冇有效嘅檔案清單",
+        "update_reason_damaged": "{name} 下載途中損壞咗",
+        "group_moments": "精彩時刻",
+        "auto_scene_enabled": "自動切換 Game / Desktop 場景",
+        "auto_scene_desc": (
+            "「{source}」擷取到全螢幕遊戲就會顯示場景「{game}」，否則顯示「{desktop}」。"
+            "兩個場景同遊戲擷取來源都有先會運作；有另一個 OBS 開緊就會暫停，費事搶咗佢嘅遊戲擷取。"
+        ),
+        "write_moment_metadata": "將片段資料存喺片段入面",
+        "write_moment_metadata_desc": (
+            "遊戲、應用程式時間線、「標記時刻」嘅標記、音軌同編碼器設定，畀 Moment Player 用，"
+            "直接存喺 MP4 入面（synopsis 標籤）。如果寫唔到（其他容器格式或者特別嘅 MP4），"
+            "就會喺片段隔籬存一個 .moment.json 檔案。"
+        ),
+        "record_inputs": "記錄撳過嘅掣（喺 Moment Player 會顯示喺片段上面）",
+        "record_inputs_desc": (
+            "淨係記錄幾時撳 1-5、Q W E R T、A S D F G、Z X C V、Shift、Ctrl、Alt、Space、Tab 同滑鼠掣，"
+            "其他一律唔記，而且得遊戲視窗喺最前面嗰陣先會記。撳掣時間存喺你儲存嘅每條片段同錄影入面，"
+            "跟住檔案一齊走：邊個收到條片段都睇到。預設閂咗。"
+        ),
+        "hotkey_save_buffer_half": "儲存短片段",
+        "hotkey_save_buffer_override_folder": "儲存重播（第二個資料夾）",
+        "hotkey_open_last_video": "開返最後儲存嘅影片",
+        "hotkey_record_alternative_folder": "開始/停止錄影（錄影資料夾）",
+        "hotkey_mark_moment": "標記時刻",
+        "variable_example": "例子",
+        "variable_%NAME": "片段名。",
+        "variable_%a": "星期嘅縮寫（跟地區設定）。",
+        "variable_%A": "星期嘅全名（跟地區設定）。",
+        "variable_%w": "用數字表示嘅星期，0 係星期日，6 係星期六。",
+        "variable_%d": "日子，兩位數。",
+        "variable_%b": "月份嘅縮寫（跟地區設定）。",
+        "variable_%B": "月份嘅全名（跟地區設定）。",
+        "variable_%m": "月份，兩位數。",
+        "variable_%y": "年份最後兩位。",
+        "variable_%Y": "完整年份。",
+        "variable_%H": "鐘頭（24 小時制），兩位數。",
+        "variable_%I": "鐘頭（12 小時制），兩位數。",
+        "variable_%p": "上晝或者下晝（跟地區設定）。",
+        "variable_%M": "分鐘，兩位數。",
+        "variable_%S": "秒，兩位數。",
+        "variable_%f": "微秒，六位數。",
+        "variable_%z": "UTC 偏移，格式係 ±HHMM[SS[.ffffff]]。",
+        "variable_%Z": "時區名。",
+        "variable_%j": "一年入面第幾日，三位數。",
+        "variable_%U": "一年入面第幾個星期（星期日係第一日）。",
+        "variable_%W": "一年入面第幾個星期（星期一係第一日）。",
+        "variable_%%": "字元 %。",
+    },
+    "hi": {
+        "script_description_summary": (
+            "रीप्ले क्लिप को ऐप या दृश्य के नाम से सेव करता है। पथ और .exe के नियम, Other फ़ोल्डर, आवाज़ें, छोटी क्लिप, "
+            "Game/Desktop दृश्य अपने आप बदलना, Moment Player के लिए क्लिप की जानकारी और अपडेट की जाँच।"
+        ),
+        "interface_language": "इंटरफ़ेस की भाषा",
+        "hotkey_settings_tip": "सभी हॉटकी OBS में बदली जा सकती हैं: सेटिंग्स -> Hotkeys।",
+        "group_clip_paths": "क्लिप फ़ोल्डर",
+        "group_clip_naming": "क्लिप के नाम",
+        "group_sound_notifications": "आवाज़ें",
+        "group_app_naming_rules": "नाम के नियम",
+        "group_updates": "अपडेट",
+        "base_folder": "क्लिप फ़ोल्डर",
+        "next_clip": "अगली क्लिप: <b>{path}</b>",
+        "next_clip_other": "“{other_folder}” सूची के ऐप: <b>{path}</b>",
+        "next_clip_game": "गेम",
+        "next_clip_scene": "दृश्य",
+        "folders_ok": "सभी फ़ोल्डर जाँचे गए, कोई समस्या नहीं।",
+        "folder_not_found": "<b>{path}</b> नहीं मिला। ड्राइव जोड़ें या दूसरा फ़ोल्डर चुनें।",
+        "folder_not_writable": "<b>{path}</b> में लिखा नहीं जा सकता। दूसरा फ़ोल्डर चुनें।",
+        "folder_wrong_drive": (
+            "गलत ड्राइव: OBS {drive} पर रिकॉर्ड करता है, इसलिए <b>{path}</b> भी {drive} पर होना चाहिए। "
+            "{drive} पर कोई फ़ोल्डर चुनें या OBS में रिकॉर्डिंग पथ बदलें।"
+        ),
+        "clips_stay_in_obs_folder": "तब तक क्लिप OBS के रिकॉर्डिंग फ़ोल्डर में रहेंगी।",
+        "use_obs_folder": "OBS का रिकॉर्डिंग फ़ोल्डर इस्तेमाल करें",
+        "check_folders": "फ़ोल्डर जाँचें",
+        "folder_guide": "फ़ोल्डर गाइड",
+        "show_more_folders": "और फ़ोल्डर",
+        "show_override_folder_settings": "अतिरिक्त हॉटकी: दूसरा फ़ोल्डर, छोटी क्लिप, अलग रिकॉर्डिंग",
+        "override_folder": "दूसरा क्लिप फ़ोल्डर",
+        "override_folder_desc": (
+            "“रीप्ले सेव करें (दूसरा फ़ोल्डर)” हॉटकी के लिए। "
+            "OBS रिकॉर्डिंग वाली ड्राइव पर ही होना चाहिए। खाली: क्लिप फ़ोल्डर।"
+        ),
+        "recording_folder": "रिकॉर्डिंग फ़ोल्डर",
+        "recording_folder_desc": (
+            "“रिकॉर्डिंग शुरू/बंद करें (रिकॉर्डिंग फ़ोल्डर)” हॉटकी के लिए। कोई भी ड्राइव। खाली: क्लिप फ़ोल्डर।"
+        ),
+        "short_clip_duration": "छोटी क्लिप",
+        "short_clip_duration_desc": (
+            "“छोटी क्लिप सेव करें” हॉटकी रीप्ले का केवल आखिरी हिस्सा रखती है। "
+            "1 मिनट का 40% = 24 सेकंड। PATH में ffmpeg होना ज़रूरी है।"
+        ),
+        "create_hard_links": "सभी क्लिप एक फ़ोल्डर में भी इकट्ठा करें",
+        "links_folder": "साझा फ़ोल्डर",
+        "links_folder_desc": (
+            "क्लिप फ़ोल्डर में सेव हुई हर क्लिप यहाँ भी दिखती है और अतिरिक्त जगह नहीं लेती (हार्ड लिंक)। "
+            "OBS रिकॉर्डिंग वाली ड्राइव पर ही होना चाहिए।"
+        ),
+        "clip_name": "क्लिप का नाम",
+        "clip_name_active_app": "सेव करते समय सक्रिय ऐप",
+        "clip_name_most_recorded_app": "रीप्ले में सबसे ज़्यादा समय सक्रिय ऐप",
+        "clip_name_current_scene": "वर्तमान दृश्य",
+        "file_name": "फ़ाइल का नाम",
+        "invalid_file_name_format": "<font color=\"red\"><pre> फ़ाइल के नाम का प्रारूप गलत है।</pre></font>",
+        "sound_volume": "आवाज़ का स्तर",
+        "test_sound": "आवाज़ जाँचें",
+        "play_on_success": "क्लिप सेव होने पर आवाज़",
+        "play_on_success_path": "सफलता की आवाज़",
+        "play_on_failure": "क्लिप सेव न होने पर आवाज़",
+        "play_on_failure_path": "विफलता की आवाज़",
+        "play_recording_start": "रिकॉर्डिंग शुरू होने पर आवाज़",
+        "play_recording_start_path": "रिकॉर्डिंग शुरू होने की आवाज़",
+        "play_recording_stop": "रिकॉर्डिंग बंद होने पर आवाज़",
+        "play_recording_stop_path": "रिकॉर्डिंग बंद होने की आवाज़",
+        "import_rules_file": "नियम आयात करने की फ़ाइल",
+        "export_rules_folder": "नियम निर्यात करने का फ़ोल्डर",
+        "path_specific_names_desc": (
+            "<b>पथ के अनुसार नाम</b><br/>"
+            "किसी .exe के पूरे पथ या उसके ऊपर के फ़ोल्डर के लिए क्लिप का नाम।"
+        ),
+        "alias_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">पथ या क्लिप के नाम में अमान्य वर्ण हैं।</span><br/>"
+            "<span style=\"color: orange\">क्लिप के नाम में ये नहीं हो सकते: "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code><br/>"
+            "पथ में ये नहीं हो सकते: <code>&lt; &gt; | * ? \" %</code></span>"
+            "</div>"
+        ),
+        "alias_path_exists": "<div style=\"font-size: 13px; color: red\">यह पथ पहले से सूची में है।</div>",
+        "alias_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">नियम का प्रारूप गलत है।</span><br/>"
+            "<span style=\"color: orange\">प्रारूप: ड्राइव:\\फ़ोल्डर या प्रोग्राम का पथ &gt; क्लिप का नाम</span><br/>"
+            "<span style=\"color: lightgreen\">उदाहरण: C:\\Program Files\\Minecraft &gt; Minecraft</span>"
+            "</div>"
+        ),
+        "aliases_format_desc": (
+            "प्रारूप: ड्राइव:\\फ़ोल्डर या प्रोग्राम का पथ > क्लिप का नाम\n"
+            "लॉन्चर, एक जैसे नाम वाली .exe या पूरे फ़ोल्डर के नियमों के लिए।\n"
+            "उदाहरण: {python_exe} > OBS"
+        ),
+        "import_path_specific_names": "पथ के अनुसार नाम आयात करें",
+        "export_path_specific_names": "पथ के अनुसार नाम निर्यात करें",
+        "exe_name_fixes_desc": (
+            "<b>.exe के नाम सुधारें</b>"
+        ),
+        "replacement_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">ऐप के नए नाम में अमान्य वर्ण हैं।</span><br/>"
+            "<span style=\"color: orange\">नए नाम में ये नहीं हो सकते: "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code></span>"
+            "</div>"
+        ),
+        "replacement_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">नियम का प्रारूप गलत है।</span><br/>"
+            "<span style=\"color: orange\">प्रारूप: मूल नाम &gt; नया नाम</span><br/>"
+            "<span style=\"color: lightgreen\">उदाहरण: TslGame &gt; PUBG</span>"
+            "</div>"
+        ),
+        "replacement_format_desc": ".exe का मूल नाम > क्लिप का नाम",
+        "other_names_invalid": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">केवल ऐप के नाम लिखें।</span><br/>"
+            "<span style=\"color: orange\">पथ और <code>&gt; / \\ :</code> जैसे विभाजक नहीं।</span>"
+            "</div>"
+        ),
+        "apps_saved_to_other": "“{other_folder}” फ़ोल्डर में सेव होने वाले ऐप",
+        "other_names_desc": "क्लिप के अंतिम नाम से पूरा मेल, छोटे-बड़े अक्षर का फ़र्क नहीं। उदाहरण: chrome",
+        "check_updates": "अपडेट के लिए देखें",
+        "open_latest_release": "नवीनतम रिलीज़ खोलें",
+        "update_status_initial": "वर्तमान संस्करण: {version}। अपडेट की जाँच अभी नहीं हुई है।",
+        "update_status_running": "अपडेट की जाँच पहले से चल रही है।",
+        "update_status_checking": (
+            "अपडेट की जाँच हो रही है...<br/>"
+            "वर्तमान संस्करण: <span style=\"font-size: 1.2em;\"><b>{version}</b></span>"
+        ),
+        "update_status_available": (
+            "नया अपडेट उपलब्ध है: {latest_version} (वर्तमान: {version})। यह अपने आप इंस्टॉल नहीं हुआ: {reason}। "
+            "अपडेट करने के लिए नवीनतम रिलीज़ खोलें।"
+        ),
+        "update_status_installed": (
+            "संस्करण {latest_version} इंस्टॉल हो गया है (अभी चल रहा है: {version})। इसे इस्तेमाल करने के लिए OBS को पुनः आरंभ करें।"
+        ),
+        "update_status_current": "वर्तमान संस्करण {version} नवीनतम है। नवीनतम रिलीज़: {latest_version}।",
+        "update_status_no_release": "GitHub पर अभी कोई रिलीज़ नहीं है। वर्तमान संस्करण: {version}।",
+        "update_status_http_error": "अपडेट की जाँच विफल: GitHub ने HTTP {code} लौटाया।",
+        "update_status_failed": "अपडेट की जाँच विफल: {error}",
+        "update_status_thread_failed": "अपडेट की जाँच का थ्रेड शुरू नहीं हो सका।",
+        "update_reason_git": "यह फ़ोल्डर git की कार्यशील प्रति है",
+        "update_reason_renamed": "स्क्रिप्ट फ़ाइल का नाम बदल दिया गया है",
+        "update_reason_tag": "रिलीज़ का टैग असामान्य है",
+        "update_reason_list": "रिलीज़ में फ़ाइलों की मान्य सूची नहीं है",
+        "update_reason_damaged": "{name} डाउनलोड के दौरान खराब हो गई",
+        "group_moments": "पल",
+        "auto_scene_enabled": "Game / Desktop दृश्य अपने आप बदलें",
+        "auto_scene_desc": (
+            "जब “{source}” किसी फ़ुलस्क्रीन गेम को कैप्चर कर लेता है, तब दृश्य “{game}” दिखता है, नहीं तो “{desktop}”। "
+            "दोनों दृश्य और गेम कैप्चर स्रोत मौजूद होने पर ही चलता है। दूसरा OBS चल रहा हो तो रुक जाता है, "
+            "ताकि उसका गेम कैप्चर न छिने।"
+        ),
+        "write_moment_metadata": "क्लिप की जानकारी क्लिप के अंदर रखें",
+        "write_moment_metadata_desc": (
+            "गेम, ऐप की समयरेखा, “पल चिह्नित करें” के निशान, ऑडियो ट्रैक और एनकोडर सेटिंग्स Moment Player के लिए "
+            "सीधे MP4 में रखी जाती हैं (synopsis टैग)। अगर यह संभव न हो (दूसरा कंटेनर या असामान्य MP4), "
+            "तो क्लिप के पास .moment.json फ़ाइल सेव होती है।"
+        ),
+        "record_inputs": "दबाई गई कुंजियाँ रिकॉर्ड करें (Moment Player में क्लिप के ऊपर दिखती हैं)",
+        "record_inputs_desc": (
+            "केवल यह रिकॉर्ड होता है कि आपने 1-5, Q W E R T, A S D F G, Z X C V, Shift, Ctrl, Alt, Space, Tab और "
+            "माउस के बटन कब दबाए, और कुछ नहीं, वह भी केवल तब जब गेम की विंडो सामने हो। यह समय आपकी सेव की हर क्लिप "
+            "और रिकॉर्डिंग के अंदर रहता है और उसके साथ जाता है: जिसे भी क्लिप मिलेगी, वह इन्हें देख सकेगा। "
+            "शुरू में बंद रहता है।"
+        ),
+        "hotkey_save_buffer_half": "छोटी क्लिप सेव करें",
+        "hotkey_save_buffer_override_folder": "रीप्ले सेव करें (दूसरा फ़ोल्डर)",
+        "hotkey_open_last_video": "आखिरी सेव किया वीडियो खोलें",
+        "hotkey_record_alternative_folder": "रिकॉर्डिंग शुरू/बंद करें (रिकॉर्डिंग फ़ोल्डर)",
+        "hotkey_mark_moment": "पल चिह्नित करें",
+        "variable_example": "उदाहरण",
+        "variable_%NAME": "क्लिप का नाम।",
+        "variable_%a": "लोकेल के अनुसार सप्ताह के दिन का छोटा नाम।",
+        "variable_%A": "लोकेल के अनुसार सप्ताह के दिन का पूरा नाम।",
+        "variable_%w": "सप्ताह का दिन अंक में, 0 रविवार और 6 शनिवार है।",
+        "variable_%d": "महीने का दिन, दो अंक।",
+        "variable_%b": "लोकेल के अनुसार महीने का छोटा नाम।",
+        "variable_%B": "लोकेल के अनुसार महीने का पूरा नाम।",
+        "variable_%m": "महीना, दो अंक।",
+        "variable_%y": "वर्ष के आखिरी दो अंक।",
+        "variable_%Y": "पूरा वर्ष।",
+        "variable_%H": "घंटा (24 घंटे की घड़ी), दो अंक।",
+        "variable_%I": "घंटा (12 घंटे की घड़ी), दो अंक।",
+        "variable_%p": "लोकेल के अनुसार AM या PM।",
+        "variable_%M": "मिनट, दो अंक।",
+        "variable_%S": "सेकंड, दो अंक।",
+        "variable_%f": "माइक्रोसेकंड, छह अंक।",
+        "variable_%z": "UTC से अंतर, प्रारूप ±HHMM[SS[.ffffff]]।",
+        "variable_%Z": "समय क्षेत्र का नाम।",
+        "variable_%j": "वर्ष का दिन, तीन अंक।",
+        "variable_%U": "वर्ष का सप्ताह (सप्ताह रविवार से शुरू)।",
+        "variable_%W": "वर्ष का सप्ताह (सप्ताह सोमवार से शुरू)।",
+        "variable_%%": "वर्ण %।",
+    },
+    "ja": {
+        "script_description_summary": (
+            "リプレイのクリップをアプリ名やシーン名で保存します。パスと .exe の命名ルール、Other フォルダー、サウンド、"
+            "短いクリップ、Game/Desktop シーンの自動切り替え、Moment Player 用のクリップ情報、更新の確認に対応しています。"
+        ),
+        "interface_language": "表示言語",
+        "hotkey_settings_tip": "ホットキーはすべて OBS の「設定 -> ホットキー」で変更できます。",
+        "group_clip_paths": "クリップフォルダー",
+        "group_clip_naming": "クリップの命名",
+        "group_sound_notifications": "サウンド",
+        "group_app_naming_rules": "命名ルール",
+        "group_updates": "更新",
+        "base_folder": "クリップフォルダー",
+        "next_clip": "次のクリップ: <b>{path}</b>",
+        "next_clip_other": "「{other_folder}」リストのアプリ: <b>{path}</b>",
+        "next_clip_game": "ゲーム",
+        "next_clip_scene": "シーン",
+        "folders_ok": "すべてのフォルダーを確認しました。問題はありません。",
+        "folder_not_found": "<b>{path}</b> が見つかりません。ドライブを接続するか、別のフォルダーを選んでください。",
+        "folder_not_writable": "<b>{path}</b> に書き込めません。別のフォルダーを選んでください。",
+        "folder_wrong_drive": (
+            "ドライブが違います: OBS は {drive} に録画するため、<b>{path}</b> も {drive} にある必要があります。"
+            "{drive} のフォルダーを選ぶか、OBS の録画ファイルのパスを変更してください。"
+        ),
+        "clips_stay_in_obs_folder": "それまでクリップは OBS の録画フォルダーに残ります。",
+        "use_obs_folder": "OBS の録画フォルダーを使う",
+        "check_folders": "フォルダーを確認",
+        "folder_guide": "フォルダー設定ガイド",
+        "show_more_folders": "その他のフォルダー",
+        "show_override_folder_settings": "追加キー: 2つ目のフォルダー、短いクリップ、別録画",
+        "override_folder": "2つ目のクリップフォルダー",
+        "override_folder_desc": (
+            "ホットキー「リプレイを保存 (2つ目のフォルダー)」で使います。"
+            "OBS の録画と同じドライブにしてください。空欄: クリップフォルダー。"
+        ),
+        "recording_folder": "録画フォルダー",
+        "recording_folder_desc": (
+            "ホットキー「録画開始/録画終了 (録画フォルダー)」で使います。どのドライブでも構いません。空欄: クリップフォルダー。"
+        ),
+        "short_clip_duration": "短いクリップ",
+        "short_clip_duration_desc": (
+            "ホットキー「短いクリップを保存」はリプレイの最後の部分だけを残します。"
+            "1分の 40% = 24秒。PATH に ffmpeg が必要です。"
+        ),
+        "create_hard_links": "すべてのクリップを1つのフォルダーにもまとめる",
+        "links_folder": "まとめ用フォルダー",
+        "links_folder_desc": (
+            "クリップフォルダーに保存したクリップがここにも表示されます。追加の容量は使いません (ハードリンク)。"
+            "OBS の録画と同じドライブにしてください。"
+        ),
+        "clip_name": "クリップ名",
+        "clip_name_active_app": "保存時にアクティブなアプリ",
+        "clip_name_most_recorded_app": "リプレイ中に最も長くアクティブだったアプリ",
+        "clip_name_current_scene": "現在のシーン",
+        "file_name": "ファイル名",
+        "invalid_file_name_format": "<font color=\"red\"><pre> ファイル名の形式が正しくありません。</pre></font>",
+        "sound_volume": "音量",
+        "test_sound": "テスト音を再生",
+        "play_on_success": "保存に成功したら音を鳴らす",
+        "play_on_success_path": "成功時のサウンド",
+        "play_on_failure": "保存に失敗したら音を鳴らす",
+        "play_on_failure_path": "失敗時のサウンド",
+        "play_recording_start": "録画開始時に音を鳴らす",
+        "play_recording_start_path": "録画開始のサウンド",
+        "play_recording_stop": "録画終了時に音を鳴らす",
+        "play_recording_stop_path": "録画終了のサウンド",
+        "import_rules_file": "ルールのインポートファイル",
+        "export_rules_folder": "ルールのエクスポート先フォルダー",
+        "path_specific_names_desc": (
+            "<b>パスごとの名前</b><br/>"
+            ".exe の完全なパスまたは親フォルダーにクリップ名を割り当てます。"
+        ),
+        "alias_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">パスまたはクリップ名に使えない文字があります。</span><br/>"
+            "<span style=\"color: orange\">クリップ名に使えない文字: "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code><br/>"
+            "パスに使えない文字: <code>&lt; &gt; | * ? \" %</code></span>"
+            "</div>"
+        ),
+        "alias_path_exists": "<div style=\"font-size: 13px; color: red\">このパスはすでにリストにあります。</div>",
+        "alias_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">ルールの形式が正しくありません。</span><br/>"
+            "<span style=\"color: orange\">形式: ドライブ:\\フォルダーまたはプログラムのパス &gt; クリップ名</span><br/>"
+            "<span style=\"color: lightgreen\">例: C:\\Program Files\\Minecraft &gt; Minecraft</span>"
+            "</div>"
+        ),
+        "aliases_format_desc": (
+            "形式: ドライブ:\\フォルダーまたはプログラムのパス > クリップ名\n"
+            "ランチャー、同名の .exe、フォルダー全体のルールに使います。\n"
+            "例: {python_exe} > OBS"
+        ),
+        "import_path_specific_names": "パスごとの名前をインポート",
+        "export_path_specific_names": "パスごとの名前をエクスポート",
+        "exe_name_fixes_desc": (
+            "<b>.exe 名の修正</b>"
+        ),
+        "replacement_invalid_chars": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">アプリ名の置き換えに使えない文字があります。</span><br/>"
+            "<span style=\"color: orange\">新しい名前に使えない文字: "
+            "<code>&lt; &gt; / \\ | * ? : \" %</code></span>"
+            "</div>"
+        ),
+        "replacement_invalid_format": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">置き換えの形式が正しくありません。</span><br/>"
+            "<span style=\"color: orange\">形式: 元の名前 &gt; 新しい名前</span><br/>"
+            "<span style=\"color: lightgreen\">例: TslGame &gt; PUBG</span>"
+            "</div>"
+        ),
+        "replacement_format_desc": "元の .exe 名 > クリップ名",
+        "other_names_invalid": (
+            "<div style=\"font-size: 13px\">"
+            "<span style=\"color: red\">アプリ名だけを入力してください。</span><br/>"
+            "<span style=\"color: orange\">パスや <code>&gt; / \\ :</code> などの区切り文字は使えません。</span>"
+            "</div>"
+        ),
+        "apps_saved_to_other": "「{other_folder}」フォルダーに保存するアプリ",
+        "other_names_desc": "最終的なクリップ名と完全に一致するもの (大文字と小文字は区別しません)。例: chrome",
+        "check_updates": "更新を確認",
+        "open_latest_release": "最新リリースを開く",
+        "update_status_initial": "現在のバージョン: {version}。更新はまだ確認していません。",
+        "update_status_running": "更新はすでに確認中です。",
+        "update_status_checking": (
+            "更新を確認中...<br/>"
+            "現在のバージョン: <span style=\"font-size: 1.2em;\"><b>{version}</b></span>"
+        ),
+        "update_status_available": (
+            "新しい更新が利用可能: {latest_version} (現在: {version})。自動でインストールできませんでした: {reason}。"
+            "最新リリースを開いて更新してください。"
+        ),
+        "update_status_installed": (
+            "バージョン {latest_version} をインストールしました (実行中: {version})。OBS を再起動すると使えます。"
+        ),
+        "update_status_current": "現在のバージョン {version} は最新です。最新リリース: {latest_version}。",
+        "update_status_no_release": "GitHub にはまだリリースがありません。現在のバージョン: {version}。",
+        "update_status_http_error": "更新の確認に失敗しました: GitHub が HTTP {code} を返しました。",
+        "update_status_failed": "更新の確認に失敗しました: {error}",
+        "update_status_thread_failed": "更新を確認するスレッドを開始できません。",
+        "update_reason_git": "このフォルダーは git の作業コピーです",
+        "update_reason_renamed": "スクリプトのファイル名が変更されています",
+        "update_reason_tag": "リリースのタグが正しくありません",
+        "update_reason_list": "リリースに有効なファイル一覧がありません",
+        "update_reason_damaged": "{name} がダウンロード中に破損しました",
+        "group_moments": "名場面",
+        "auto_scene_enabled": "Game / Desktop シーンを自動で切り替える",
+        "auto_scene_desc": (
+            "「{source}」がフルスクリーンのゲームをキャプチャするとシーン「{game}」を、それ以外では「{desktop}」を表示します。"
+            "両方のシーンとゲームキャプチャのソースがある場合だけ動作し、別の OBS の実行中は、"
+            "そのゲームキャプチャを奪わないように一時停止します。"
+        ),
+        "write_moment_metadata": "クリップ情報をクリップ内に保存する",
+        "write_moment_metadata_desc": (
+            "ゲーム、アプリのタイムライン、「場面に印を付ける」の印、音声トラック、エンコーダ設定を Moment Player 用に "
+            "MP4 の中 (synopsis タグ) へ保存します。できない場合 (別のコンテナや特殊な MP4) は、"
+            "クリップの隣に .moment.json ファイルを保存します。"
+        ),
+        "record_inputs": "キー入力を記録する (Moment Player でクリップの上に表示)",
+        "record_inputs_desc": (
+            "1-5、Q W E R T、A S D F G、Z X C V、Shift、Ctrl、Alt、Space、Tab、マウスボタンを押した時刻だけを、"
+            "ゲームのウィンドウが前面にある間だけ記録します。押した時刻は保存したすべてのクリップと録画の中に入り、"
+            "ファイルと一緒に渡されます: クリップを受け取った人は誰でも見ることができます。初期設定はオフです。"
+        ),
+        "hotkey_save_buffer_half": "短いクリップを保存",
+        "hotkey_save_buffer_override_folder": "リプレイを保存 (2つ目のフォルダー)",
+        "hotkey_open_last_video": "最後に保存した動画を開く",
+        "hotkey_record_alternative_folder": "録画開始/録画終了 (録画フォルダー)",
+        "hotkey_mark_moment": "場面に印を付ける",
+        "variable_example": "例",
+        "variable_%NAME": "クリップ名。",
+        "variable_%a": "曜日の略称 (ロケールに従う)。",
+        "variable_%A": "曜日の正式名 (ロケールに従う)。",
+        "variable_%w": "曜日の数字。0 が日曜日、6 が土曜日。",
+        "variable_%d": "日、2桁。",
+        "variable_%b": "月の略称 (ロケールに従う)。",
+        "variable_%B": "月の正式名 (ロケールに従う)。",
+        "variable_%m": "月、2桁。",
+        "variable_%y": "年の下2桁。",
+        "variable_%Y": "年、4桁。",
+        "variable_%H": "時 (24時間制)、2桁。",
+        "variable_%I": "時 (12時間制)、2桁。",
+        "variable_%p": "午前または午後 (ロケールに従う)。",
+        "variable_%M": "分、2桁。",
+        "variable_%S": "秒、2桁。",
+        "variable_%f": "マイクロ秒、6桁。",
+        "variable_%z": "UTC からの差。形式は ±HHMM[SS[.ffffff]]。",
+        "variable_%Z": "タイムゾーン名。",
+        "variable_%j": "年初からの日数、3桁。",
+        "variable_%U": "年の週番号 (日曜日始まり)。",
+        "variable_%W": "年の週番号 (月曜日始まり)。",
+        "variable_%%": "文字 %。",
     },
 }
 
@@ -907,35 +1751,35 @@ def fetch_release_file(tag: str, name: str, limit: int) -> bytes:
     return data
 
 
-def install_update(tag: str) -> str | None:
+def install_update(tag: str, lang: str = "en") -> str | None:
     """
     Replaces the script's files with those of release `tag`, as listed in its SHA256.json
-    ({"file name": "sha256 hex"}). Returns why it did not, or None when the files are in place.
+    ({"file name": "sha256 hex"}). Returns why it did not, in `lang`, or None when the files are in place.
     OBS keeps running the loaded script: the new one starts with the next OBS start.
     """
     folder = CONSTANTS.SCRIPT_DIR
     script_name = CONSTANTS.UPDATE_SCRIPT_NAME
     if (folder / ".git").exists():
-        return "this folder is a git checkout"  # the author's working copy: never overwritten
+        return tr("update_reason_git", lang=lang)  # the author's working copy: never overwritten
     if Path(__file__).name != script_name:
-        return "the script file was renamed"    # OBS would keep loading the old file
+        return tr("update_reason_renamed", lang=lang)  # OBS would keep loading the old file
     if not CONSTANTS.UPDATE_TAG_RE.fullmatch(tag):
-        return "unexpected release tag"
+        return tr("update_reason_tag", lang=lang)
 
     ready = []
     try:
         hashes = json.loads(fetch_release_file(tag, CONSTANTS.UPDATE_HASHES_NAME, 65536))
         if not isinstance(hashes, dict) or script_name not in hashes:
-            return "the release has no valid file list"
+            return tr("update_reason_list", lang=lang)
         for name, want in hashes.items():
             if not (isinstance(want, str) and CONSTANTS.UPDATE_FILE_NAME_RE.fullmatch(str(name))):
-                return "the release has no valid file list"
+                return tr("update_reason_list", lang=lang)
             target = folder / name
             if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == want.lower():
                 continue
             data = fetch_release_file(tag, name, CONSTANTS.UPDATE_FILE_MAX)
             if hashlib.sha256(data).hexdigest() != want.lower():
-                return f"{name} was damaged on the way"
+                return tr("update_reason_damaged", lang=lang, name=name)
             if name == script_name:
                 compile(data, name, "exec")  # a script that cannot load would leave OBS without one
             part = target.with_name(name + ".update")
@@ -967,7 +1811,7 @@ def check_for_updates(source: str = "manual", lang: str | None = None, *, lock_a
         VARIABLES.latest_release_url = release_url
 
         if is_newer_version(latest_version, CONSTANTS.VERSION):
-            reason = install_update(latest_version)
+            reason = install_update(latest_version, lang)
             set_update_status_key(
                 "update_status_available" if reason else "update_status_installed",
                 latest_version=latest_version,
@@ -1030,141 +1874,39 @@ def start_update_check_thread(source: str = "automatic", props=None) -> bool:
 
 
 # -------------------- properties.py --------------------
-variables_tip = """<table>
-<tr><th align='left'>%NAME</th><td> - name of the clip.</td></tr>
-
-<tr><th align='left'>%a</th><td> - Weekday as locale’s abbreviated name.<br/>
-Example: Sun, Mon, …, Sat (en_US); So, Mo, …, Sa (de_DE)</td></tr>
-
-<tr><th align='left'>%A</th><td> - Weekday as locale’s full name.<br/>
-Example: Sunday, Monday, …, Saturday (en_US); Sonntag, Montag, …, Samstag (de_DE)</td></tr>
-
-<tr><th align='left'>%w</th><td> - Weekday as a decimal number, where 0 is Sunday and 6 is Saturday.<br/>
-Example: 0, 1, …, 6</td></tr>
-
-<tr><th align='left'>%d</th><td> - Day of the month as a zero-padded decimal number.<br/>
-Example: 01, 02, …, 31</td></tr>
-
-<tr><th align='left'>%b</th><td> - Month as locale’s abbreviated name.<br/>
-Example: Jan, Feb, …, Dec (en_US); Jan, Feb, …, Dez (de_DE)</td></tr>
-
-<tr><th align='left'>%B</th><td> - Month as locale’s full name.<br/>
-Example: January, February, …, December (en_US); Januar, Februar, …, Dezember (de_DE)</td></tr>
-
-<tr><th align='left'>%m</th><td> - Month as a zero-padded decimal number.<br/>
-Example: 01, 02, …, 12</td></tr>
-
-<tr><th align='left'>%y</th><td> - Year without century as a zero-padded decimal number.<br/>
-Example: 00, 01, …, 99</td></tr>
-
-<tr><th align='left'>%Y</th><td> - Year with century as a decimal number.<br/>
-Example: 0001, 0002, …, 2013, 2014, …, 9998, 9999</td></tr>
-
-<tr><th align='left'>%H</th><td> - Hour (24-hour clock) as a zero-padded decimal number.<br/>
-Example: 00, 01, …, 23</td></tr>
-
-<tr><th align='left'>%I</th><td> - Hour (12-hour clock) as a zero-padded decimal number.<br/>
-Example: 01, 02, …, 12</td></tr>
-
-<tr><th align='left'>%p</th><td> - Locale’s equivalent of either AM or PM.<br/>
-Example: AM, PM (en_US); am, pm (de_DE)</td></tr>
-
-<tr><th align='left'>%M</th><td> - Minute as a zero-padded decimal number.<br/>
-Example: 00, 01, …, 59</td></tr>
-
-<tr><th align='left'>%S</th><td> - Second as a zero-padded decimal number.<br/>
-Example: 00, 01, …, 59</td></tr>
-
-<tr><th align='left'>%f</th><td> - Microsecond as a decimal number, zero-padded to 6 digits.<br/>
-Example: 000000, 000001, …, 999999</td></tr>
-
-<tr><th align='left'>%z</th><td> - UTC offset in the form ±HHMM[SS[.ffffff]]<br/>
-Example: +0000, -0400, +1030, +063415, -030712.345216</td></tr>
-
-<tr><th align='left'>%Z</th><td> - Time zone name<br/>
-Example: UTC, GMT</td></tr>
-
-<tr><th align='left'>%j</th><td> - Day of the year as a zero-padded decimal number.<br/>
-Example: 001, 002, …, 366</td></tr>
-
-<tr><th align='left'>%U</th><td> - Week number of the year (Sunday as the first day of the week) as a zero-padded decimal number. All days in a new year preceding the first Sunday are considered to be in week 0.<br/>
-Example: 00, 01, …, 53</td></tr>
-
-<tr><th align='left'>%W</th><td> - Week number of the year (Monday as the first day of the week) as a zero-padded decimal number. All days in a new year preceding the first Monday are considered to be in week 0.<br/>
-Example: 00, 01, …, 53</td></tr>
-
-<tr><th align='left'>%%</th><td> - A literal '%' character.</td></tr>
-</table>"""
-
-variables_tip_ru = """<table>
-<tr><th align='left'>%NAME</th><td> - имя клипа.</td></tr>
-
-<tr><th align='left'>%a</th><td> - сокращенное название дня недели по локали.<br/>
-Пример: Sun, Mon, …, Sat (en_US)</td></tr>
-
-<tr><th align='left'>%A</th><td> - полное название дня недели по локали.<br/>
-Пример: Sunday, Monday, …, Saturday (en_US)</td></tr>
-
-<tr><th align='left'>%w</th><td> - день недели числом, где 0 — воскресенье, 6 — суббота.<br/>
-Пример: 0, 1, …, 6</td></tr>
-
-<tr><th align='left'>%d</th><td> - день месяца двумя цифрами.<br/>
-Пример: 01, 02, …, 31</td></tr>
-
-<tr><th align='left'>%b</th><td> - сокращенное название месяца по локали.<br/>
-Пример: Jan, Feb, …, Dec (en_US)</td></tr>
-
-<tr><th align='left'>%B</th><td> - полное название месяца по локали.<br/>
-Пример: January, February, …, December (en_US)</td></tr>
-
-<tr><th align='left'>%m</th><td> - месяц двумя цифрами.<br/>
-Пример: 01, 02, …, 12</td></tr>
-
-<tr><th align='left'>%y</th><td> - год без века двумя цифрами.<br/>
-Пример: 00, 01, …, 99</td></tr>
-
-<tr><th align='left'>%Y</th><td> - год полностью.<br/>
-Пример: 2025, 2026</td></tr>
-
-<tr><th align='left'>%H</th><td> - час в 24-часовом формате двумя цифрами.<br/>
-Пример: 00, 01, …, 23</td></tr>
-
-<tr><th align='left'>%I</th><td> - час в 12-часовом формате двумя цифрами.<br/>
-Пример: 01, 02, …, 12</td></tr>
-
-<tr><th align='left'>%p</th><td> - AM или PM по локали.<br/>
-Пример: AM, PM (en_US)</td></tr>
-
-<tr><th align='left'>%M</th><td> - минуты двумя цифрами.<br/>
-Пример: 00, 01, …, 59</td></tr>
-
-<tr><th align='left'>%S</th><td> - секунды двумя цифрами.<br/>
-Пример: 00, 01, …, 59</td></tr>
-
-<tr><th align='left'>%f</th><td> - микросекунды, 6 цифр.<br/>
-Пример: 000000, 000001, …, 999999</td></tr>
-
-<tr><th align='left'>%z</th><td> - UTC-смещение в формате ±HHMM[SS[.ffffff]].<br/>
-Пример: +0000, -0400, +1030</td></tr>
-
-<tr><th align='left'>%Z</th><td> - название часового пояса.<br/>
-Пример: UTC, GMT</td></tr>
-
-<tr><th align='left'>%j</th><td> - день года тремя цифрами.<br/>
-Пример: 001, 002, …, 366</td></tr>
-
-<tr><th align='left'>%U</th><td> - номер недели года, если неделя начинается в воскресенье.<br/>
-Пример: 00, 01, …, 53</td></tr>
-
-<tr><th align='left'>%W</th><td> - номер недели года, если неделя начинается в понедельник.<br/>
-Пример: 00, 01, …, 53</td></tr>
-
-<tr><th align='left'>%%</th><td> - символ %.</td></tr>
-</table>"""
+# File name variables, shown as the tip of the file name field.
+VARIABLE_EXAMPLES = {
+    "%NAME": "",
+    "%a": "Sun, Mon, …, Sat (en_US); So, Mo, …, Sa (de_DE)",
+    "%A": "Sunday, Monday, …, Saturday (en_US); Sonntag, Montag, …, Samstag (de_DE)",
+    "%w": "0, 1, …, 6",
+    "%d": "01, 02, …, 31",
+    "%b": "Jan, Feb, …, Dec (en_US); Jan, Feb, …, Dez (de_DE)",
+    "%B": "January, February, …, December (en_US); Januar, Februar, …, Dezember (de_DE)",
+    "%m": "01, 02, …, 12",
+    "%y": "00, 01, …, 99",
+    "%Y": "2025, 2026",
+    "%H": "00, 01, …, 23",
+    "%I": "01, 02, …, 12",
+    "%p": "AM, PM (en_US); am, pm (de_DE)",
+    "%M": "00, 01, …, 59",
+    "%S": "00, 01, …, 59",
+    "%f": "000000, 000001, …, 999999",
+    "%z": "+0000, -0400, +1030, +063415, -030712.345216",
+    "%Z": "UTC, GMT",
+    "%j": "001, 002, …, 366",
+    "%U": "00, 01, …, 53",
+    "%W": "00, 01, …, 53",
+    "%%": "",
+}
 
 
-def get_variables_tip() -> str:
-    return variables_tip_ru if get_ui_language() == "ru" else variables_tip
+def get_variables_tip(data=None) -> str:
+    rows = []
+    for code, examples in VARIABLE_EXAMPLES.items():
+        example = f"<br/>\n{tr('variable_example', data=data)}: {examples}" if examples else ""
+        rows.append(f"<tr><th align='left'>{code}</th><td> - {tr(f'variable_{code}', data=data)}{example}</td></tr>")
+    return "<table>\n" + "\n\n".join(rows) + "\n</table>"
 
 
 def setup_interface_settings(props):
@@ -1175,8 +1917,8 @@ def setup_interface_settings(props):
         type=obs.OBS_COMBO_TYPE_LIST,
         format=obs.OBS_COMBO_FORMAT_STRING
     )
-    obs.obs_property_list_add_string(p=language_prop, name="English", val="en")
-    obs.obs_property_list_add_string(p=language_prop, name="Russian", val="ru")
+    for code, name in UI_LANGUAGES.items():
+        obs.obs_property_list_add_string(p=language_prop, name=name, val=code)
     obs.obs_property_set_modified_callback(language_prop, update_interface_language_callback)
     obs.obs_properties_add_text(
         props=props,
@@ -1270,7 +2012,7 @@ def refresh_localized_properties(props, data=None) -> None:
     refresh_clip_naming_mode_options(clip_naming, data)
     filename_prop = obs.obs_properties_get(clip_naming, PN.PROP_CLIPS_FILENAME_TEMPLATE) if clip_naming is not None else None
     if filename_prop is not None:
-        obs.obs_property_set_long_description(filename_prop, variables_tip_ru if get_ui_language(data) == "ru" else variables_tip)
+        obs.obs_property_set_long_description(filename_prop, get_variables_tip(data))
 
     notifications = get_group_content(props, PN.GR_SOUND_NOTIFICATION_SETTINGS)
     set_property_description(notifications, PN.PROP_SOUND_VOLUME, tr("sound_volume", data=data))
@@ -1293,7 +2035,7 @@ def refresh_localized_properties(props, data=None) -> None:
     set_property_description(moments, PN.PROP_WRITE_MOMENT_METADATA, tr("write_moment_metadata", data=data))
     set_property_description(moments, PN.TXT_WRITE_MOMENT_METADATA_DESC, tr("write_moment_metadata_desc", data=data))
     set_property_description(moments, PN.PROP_RECORD_INPUTS, tr("record_inputs", data=data))
-    set_property_description(moments, PN.TXT_RECORD_INPUTS_DESC, tr("record_inputs_desc", data=data))
+    set_property_description(moments, PN.TXT_RECORD_INPUTS_DESC, record_inputs_desc_text(data))
 
     app_rules = get_group_content(props, PN.GR_ALIASES_SETTINGS)
     set_property_description(app_rules, PN.TXT_ALIASES_DESC, tr("path_specific_names_desc", data=data))
@@ -1665,6 +2407,15 @@ def auto_scene_desc_text(data=None) -> str:
     )
 
 
+def record_inputs_desc_text(data=None) -> str:
+    """The key recording text, with a picture of what Moment Player shows when the file is next to the script."""
+    text = tr("record_inputs_desc", data=data)
+    picture = CONSTANTS.INPUT_OVERLAY_PICTURE
+    if picture.is_file():
+        text += f'<br/><br/><img src="{html.escape(picture.as_uri())}" width="350" height="184"/>'
+    return text
+
+
 def setup_moment_settings(group_obj):
     auto_scene_prop = obs.obs_properties_add_bool(
         props=group_obj,
@@ -1696,7 +2447,7 @@ def setup_moment_settings(group_obj):
     obs.obs_properties_add_text(
         props=group_obj,
         name=PN.TXT_RECORD_INPUTS_DESC,
-        description=tr("record_inputs_desc"),
+        description=record_inputs_desc_text(),
         type=obs.OBS_TEXT_INFO
     )
     obs.obs_property_set_modified_callback(auto_scene_prop, persist_settings_callback)
@@ -1968,6 +2719,8 @@ def update_interface_language_callback(p, prop, data):
     try:
         save_persisted_settings_from_obs_data(data)
         refresh_localized_properties(p, data)
+        for key_name, key_id in VARIABLES.hotkey_ids.items():
+            obs.obs_hotkey_set_description(key_id, hotkey_text(key_name, data))
         apply_settings = getattr(obs, "obs_properties_apply_settings", None)
         if apply_settings is not None:
             with suppress(Exception):
@@ -2039,7 +2792,8 @@ def use_obs_folder_callback(props, *args):
 
 
 def open_folder_guide_callback(*args):
-    webbrowser.open(CONSTANTS.FOLDER_GUIDE_URLS[get_ui_language()], 1)
+    urls = CONSTANTS.FOLDER_GUIDE_URLS
+    webbrowser.open(urls.get(get_ui_language(), urls["en"]), 1)
 
 
 def set_info_text(props, prop_name: str, text: str, *, error: bool = False) -> None:
@@ -5234,27 +5988,31 @@ def build_hotkey_data(bindings: list[dict]):
     return data_array
 
 
+def hotkey_text(key_name: str, data=None) -> str:
+    return "[Moment Replays] " + tr(f"hotkey_{key_name}", data=data)
+
+
 def load_hotkeys():
     keys = (
-        (PN.HK_SAVE_BUFFER_HALF, "[Moment Replays] Save short clip",
+        (PN.HK_SAVE_BUFFER_HALF,
          lambda pressed: save_half_buffer() if pressed else None),
 
-        (PN.HK_SAVE_BUFFER_OVERRIDE, "[Moment Replays] Save buffer (override folder)",
+        (PN.HK_SAVE_BUFFER_OVERRIDE,
          lambda pressed: save_buffer_to_override_folder() if pressed else None),
 
-        (PN.HK_OPEN_LAST_VIDEO, "[Moment Replays] Open last saved video",
+        (PN.HK_OPEN_LAST_VIDEO,
          lambda pressed: open_last_saved_video() if pressed else None),
 
-        (PN.HK_RECORD_ALT, "[Moment Replays] Start/stop recording (alternative folder)",
+        (PN.HK_RECORD_ALT,
          lambda pressed: toggle_alt_recording_save() if pressed else None),
 
-        (PN.HK_MARK_MOMENT, "[Moment Replays] Mark moment",
+        (PN.HK_MARK_MOMENT,
          lambda pressed: mark_moment() if pressed else None)
     )
 
     saved = load_persisted_settings().get(PERSISTED_HOTKEYS_KEY, {})
-    for key_name, key_desc, key_callback in keys:
-        key_id = obs.obs_hotkey_register_frontend(key_name, key_desc, key_callback)
+    for key_name, key_callback in keys:
+        key_id = obs.obs_hotkey_register_frontend(key_name, hotkey_text(key_name), key_callback)
         VARIABLES.hotkey_ids.update({key_name: key_id})
         key_data = obs.obs_data_get_array(VARIABLES.script_settings, key_name)
         default = HOTKEY_DEFAULTS.get(key_name)

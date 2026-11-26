@@ -6,7 +6,7 @@ param([Parameter(Mandatory)][string]$Tag, [Parameter(Mandatory)][string]$Notes, 
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $repo = 'Arkanoidvfx/Moment_Replays'
-$files = 'Moment_Replays.py', 'Recording_Started.wav', 'Recording_Stoped.wav', 'Replay_Failed.wav', 'Replay_Saved.wav'
+$files = 'Moment_Replays.py', 'Recording_Started.wav', 'Recording_Stoped.wav', 'Replay_Failed.wav', 'Replay_Saved.wav', 'Moment_Input_Overlay.png'
 if ($Tag -notmatch '^v\d+(\.\d+)*$') { throw "unexpected tag '$Tag'" }
 if (-not (Test-Path -LiteralPath $Notes)) { throw "no notes file '$Notes'" }
 if ((Get-Content -Raw .\Moment_Replays.py) -notmatch ('VERSION = "' + [regex]::Escape($Tag.Substring(1)) + '"')) { throw "CONSTANTS.VERSION is not $($Tag.Substring(1))" }
