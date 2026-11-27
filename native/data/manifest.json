@@ -1,0 +1,16 @@
+{
+  "display_name": "Moment Replays",
+  "id": "com.moment.replays",
+  "name": "moment-replays",
+  "version": "2.0.1",
+  "os_arch": "windows-x64",
+  "description": "Names and sorts replay clips by game, with sounds, short clips, marks, Game/Desktop auto scenes and clip info for Moment Player.",
+  "long_description": "Saves replay-buffer clips into a folder per game with readable names, plays a sound when a clip is saved, cuts short clips, marks moments, switches Game and Desktop scenes by itself and stores clip info (game, timeline, marks, key presses) inside each MP4 for Moment Player.",
+  "urls": {
+    "repository": "https://github.com/Arkanoidvfx/Moment_Replays",
+    "website": "https://github.com/Arkanoidvfx/Moment_Replays",
+    "support": "https://github.com/Arkanoidvfx/Moment_Replays/issues"
+  },
+  "has_banner": false,
+  "has_icon": false
+}

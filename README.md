@@ -1,5 +1,17 @@
 # Moment Replays
 
+Moment Replays saves and organizes OBS replay-buffer clips on Windows.
+
+## Native plugin for Windows x64
+
+[Download Moment Replays 2.0.1](https://github.com/Arkanoidvfx/Moment_Replays/releases/download/v2.0.1/Moment-Replays-v2.0.1-windows-x64.zip) for OBS Studio 30 or later. The ZIP contains layouts for OBS 30–32 and for OBS 33 and later. Follow the included README, then open **Tools → Moment Replays** in OBS.
+
+Native plugin 2.0 installations check for updates when OBS starts. The updated plugin loads on the following start. If you use the Python edition and want to switch, keep the script's settings and remove the script from **Tools → Scripts** when installing the plugin.
+
+[Native source and build instructions](native) · [2.0.1 release notes](https://github.com/Arkanoidvfx/Moment_Replays/releases/tag/v2.0.1)
+
+## Python script
+
 An OBS Studio script for flexible replay-buffer clip management on Windows.
 It automatically renames and sorts your saved replay clips — by the app or
 scene you were in — and adds path/`.exe` naming rules, sound notifications,

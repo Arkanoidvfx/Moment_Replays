@@ -2,6 +2,12 @@
 
 All notable changes to Moment Replays are documented here.
 
+## v2.0.1 — Windows native plugin
+
+- Reuses key-state results for game inputs and overlapping Save Replay bindings through a fixed-size cache. The game sampling target remains 250 Hz.
+- Ignores out-of-range Windows virtual-key codes when loading hotkey bindings.
+- Packages the Windows x64 plugin for OBS 30 and later, with automatic updates for existing native plugin 2.0 installations. The [v1.11 script](https://github.com/Arkanoidvfx/Moment_Replays/releases/tag/v1.11) remains available separately.
+
 ## v1.11
 - *Check for updates* shows how the check ended (up to date, installed, available and why not,
   or failed) right after the press, instead of "Checking for updates..." until the panel was reopened.
